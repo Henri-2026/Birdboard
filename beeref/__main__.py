@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# This file is part of BeeRef.
+# This file is part of Birdboard (based on BeeRef).
 #
 # BeeRef is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -15,19 +15,20 @@
 # You should have received a copy of the GNU General Public License
 # along with BeeRef.  If not, see <https://www.gnu.org/licenses/>.
 
+import ctypes
 import logging
 import os
 import platform
 import signal
 import sys
 
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from beeref import constants
 from beeref.assets import BeeAssets
 from beeref.config import CommandlineArgs, BeeSettings, logfile_name
-from beeref.utils import create_palette_from_dict
 from beeref.view import BeeGraphicsView
+from beeref.win_dwm import apply_dwm_window_shadow
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +52,11 @@ class BeeRefMainWindow(QtWidgets.QMainWindow):
         super().__init__()
         app.setOrganizationName(constants.APPNAME)
         app.setApplicationName(constants.APPNAME)
-        self.setWindowIcon(BeeAssets().logo)
+        icon = BeeAssets().logo
+        app.setWindowIcon(icon)
+        self.setWindowIcon(icon)
         self.view = BeeGraphicsView(app, self)
-        default_window_size = QtCore.QSize(500, 300)
+        default_window_size = QtCore.QSize(900, 620)
         geom = self.view.settings.value('MainWindow/geometry')
         if geom is None:
             self.resize(default_window_size)
@@ -62,20 +65,23 @@ class BeeRefMainWindow(QtWidgets.QMainWindow):
                 self.resize(default_window_size)
         self.setCentralWidget(self.view)
         self.show()
+        apply_dwm_window_shadow(
+            self, is_dark=(constants.ACTIVE_THEME == 'dark'))
 
     def closeEvent(self, event):
         geom = self.saveGeometry()
         self.view.settings.setValue('MainWindow/geometry', geom)
+        self.view.prepare_for_close()
         event.accept()
 
     def __del__(self):
-        del self.view
+        if hasattr(self, 'view'):
+            del self.view
 
 
 def safe_timer(timeout, func, *args, **kwargs):
     """Create a timer that is safe against garbage collection and
     overlapping calls.
-    See: http://ralsina.me/weblog/posts/BB974.html
     """
     def timer_event():
         try:
@@ -99,33 +105,44 @@ def handle_uncaught_exception(exc_type, exc, traceback):
 sys.excepthook = handle_uncaught_exception
 
 
+def _configure_gpu_surface_format():
+    fmt = QtGui.QSurfaceFormat()
+    fmt.setSamples(4)
+    fmt.setSwapBehavior(QtGui.QSurfaceFormat.SwapBehavior.DoubleBuffer)
+    fmt.setSwapInterval(1)
+    QtGui.QSurfaceFormat.setDefaultFormat(fmt)
+
+
 def main():
+    if sys.platform == 'win32':
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                'Birdboard.ReferenceBoard.1.0')
+        except Exception:
+            pass
+
+    _configure_gpu_surface_format()
+
     logger.info(f'Starting {constants.APPNAME} version {constants.VERSION}')
     logger.debug('System: %s', ' '.join(platform.uname()))
     logger.debug('Python: %s', platform.python_version())
-    logger.debug('LD_LIBRARY_PATH: %s', os.environ.get('LD_LIBRARY_PATH'))
     settings = BeeSettings()
     logger.info(f'Using settings: {settings.fileName()}')
     logger.info(f'Logging to: {logfile_name()}')
     settings.on_startup()
-    args = CommandlineArgs(with_check=True)  # Force checking
+    args = CommandlineArgs(with_check=True)
     assert not args.debug_raise_error, args.debug_raise_error
 
-    os.environ["QT_DEBUG_PLUGINS"] = "1"
     app = BeeRefApplication(sys.argv)
-    palette = create_palette_from_dict(constants.COLORS)
-    app.setPalette(palette)
     bee = BeeRefMainWindow(app)  # NOQA:F841
 
     signal.signal(signal.SIGINT, handle_sigint)
-    # Repeatedly run python-noop to give the interpreter time to
-    # handle signals
-    safe_timer(50, lambda: None)
+    safe_timer(100, lambda: None)
 
     app.exec()
     del bee
     del app
-    logger.debug('BeeRef closed')
+    logger.debug('Birdboard closed')
     QtCore.qInstallMessageHandler(None)
 
 

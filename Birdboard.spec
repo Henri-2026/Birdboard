@@ -23,7 +23,7 @@ a = Analysis(
     datas=[
         (join('beeref', 'documentation'), join('beeref', 'documentation')),
         (join('beeref', 'assets', '*.png'), join('beeref', 'assets'))],
-    hiddenimports=[],
+    hiddenimports=['PyQt6.QtOpenGLWidgets', 'PyQt6.QtOpenGL'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

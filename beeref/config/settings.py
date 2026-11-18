@@ -101,6 +101,7 @@ class CommandlineArgs:
 class BeeSettingsEvents(QtCore.QObject):
     restore_defaults = QtCore.pyqtSignal()
     restore_keyboard_defaults = QtCore.pyqtSignal()
+    theme_changed = QtCore.pyqtSignal(str)
 
 
 # We want to send and receive settings events globally, not per
@@ -113,6 +114,11 @@ settings_events = BeeSettingsEvents()
 class BeeSettings(QtCore.QSettings):
 
     FIELDS = {
+        'View/theme': {
+            'default': 'light',
+            'validate': lambda x: x in ('light', 'dark'),
+            'post_save_callback': lambda val: settings_events.theme_changed.emit(val),
+        },
         'Save/confirm_close_unsaved': {
             'default': True,
             'cast': bool,
@@ -132,7 +138,7 @@ class BeeSettings(QtCore.QSettings):
                 'optimal', 'horizontal', 'vertical', 'square'),
         },
         'Items/image_allocation_limit': {
-            'default': 256,
+            'default': 1024,
             'cast': int,
             'validate': lambda x: x >= 0,
             'post_save_callback': QtGui.QImageReader.setAllocationLimit,
@@ -160,6 +166,7 @@ class BeeSettings(QtCore.QSettings):
         else:
             alloc = self.valueOrDefault('Items/image_allocation_limit')
         QtGui.QImageReader.setAllocationLimit(alloc)
+        constants.set_active_theme(self.valueOrDefault('View/theme'))
 
     def setValue(self, key, value):
         super().setValue(key, value)

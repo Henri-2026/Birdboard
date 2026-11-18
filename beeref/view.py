@@ -1,4 +1,4 @@
-# This file is part of BeeRef.
+# This file is part of Birdboard (based on BeeRef).
 #
 # BeeRef is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -17,18 +17,26 @@ from functools import partial
 import logging
 import os
 import os.path
+import sys
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtOpenGLWidgets, QtWidgets, sip
 from PyQt6.QtCore import Qt
 
 from beeref.actions import ActionsMixin, actions
 from beeref import commands
-from beeref.config import CommandlineArgs, BeeSettings, KeyboardSettings
+from beeref.config import CommandlineArgs, BeeSettings, KeyboardSettings, settings_events
 from beeref import constants
 from beeref import fileio
 from beeref.fileio.errors import IMG_LOADING_ERROR_MSG
 from beeref.fileio.export import exporter_registry, ImagesToDirectoryExporter
 from beeref import widgets
+from beeref.widgets.penart_menu import PenartMenuController
+from beeref.win_dwm import (
+    TrafficLightControls,
+    apply_dwm_window_shadow,
+    cursor_for_edges,
+    detect_resize_edges,
+)
 from beeref.items import BeePixmapItem, BeeTextItem
 from beeref.main_controls import MainControlsMixin
 from beeref.scene import BeeGraphicsScene
@@ -53,11 +61,21 @@ class BeeGraphicsView(MainControlsMixin,
         self.parent = parent
         self.settings = BeeSettings()
         self.keyboard_settings = KeyboardSettings()
+
+        # Initialize hardware-accelerated OpenGL viewport BEFORE child overlays
+        self._init_gpu_viewport()
+
         self.welcome_overlay = widgets.welcome_overlay.WelcomeOverlay(self)
 
         self.setBackgroundBrush(
             QtGui.QBrush(QtGui.QColor(*constants.COLORS['Scene:Canvas'])))
         self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        self.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        self.setOptimizationFlag(
+            QtWidgets.QGraphicsView.OptimizationFlag.DontSavePainterState, True)
+        self.setOptimizationFlag(
+            QtWidgets.QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing,
+            True)
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
         self.undo_stack = QtGui.QUndoStack(self)
@@ -66,7 +84,7 @@ class BeeGraphicsView(MainControlsMixin,
         self.undo_stack.canUndoChanged.connect(self.on_can_undo_changed)
         self.undo_stack.cleanChanged.connect(self.on_undo_clean_changed)
 
-        self.filename = None
+        self._filename = None
         self.previous_transform = None
         self.active_mode = None
 
@@ -78,19 +96,50 @@ class BeeGraphicsView(MainControlsMixin,
         self.setScene(self.scene)
 
         # Context menu and actions
-        self.build_menu_and_actions()
         self.control_target = self
+        self.traffic_lights = TrafficLightControls(parent, self)
+        self.build_menu_and_actions()
         self.init_main_controls(main_window=parent)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.welcome_overlay.raise_()
+        self.traffic_lights.raise_()
+
+        settings_events.theme_changed.connect(self.apply_theme)
+        self.apply_theme(self.settings.valueOrDefault('View/theme'))
 
         # Load files given via command line
         if commandline_args.filenames:
             fn = commandline_args.filenames[0]
-            if os.path.splitext(fn)[1] == '.bee':
+            if os.path.splitext(fn)[1].lower() == '.bee':
                 self.open_from_file(fn)
             else:
                 self.do_insert_images(commandline_args.filenames)
 
         self.update_window_title()
+
+    def _init_gpu_viewport(self):
+        """Attach QOpenGLWidget viewport for smooth GPU compositing of 1000+ items."""
+        if os.environ.get('QT_QPA_PLATFORM') in ('offscreen', 'minimal'):
+            return
+        if os.environ.get('BIRDBOARD_NO_OPENGL') == '1':
+            return
+        try:
+            fmt = QtGui.QSurfaceFormat()
+            fmt.setSamples(4)
+            fmt.setSwapBehavior(
+                QtGui.QSurfaceFormat.SwapBehavior.DoubleBuffer)
+            fmt.setSwapInterval(1)
+            gl_vp = QtOpenGLWidgets.QOpenGLWidget()
+            gl_vp.setFormat(fmt)
+            self.setViewport(gl_vp)
+            self.setViewportUpdateMode(
+                QtWidgets.QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+            logger.info('GPU OpenGL viewport enabled (4x MSAA)')
+        except Exception:
+            logger.exception('OpenGL viewport unavailable; falling back to CPU')
+            self.setViewportUpdateMode(
+                QtWidgets.QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
 
     @property
     def filename(self):
@@ -119,6 +168,17 @@ class BeeGraphicsView(MainControlsMixin,
         if self.scene.has_multi_selection():
             self.scene.multi_select_item.bring_to_front()
 
+    def prepare_for_close(self):
+        """Disconnect scene signals before teardown for instant, clean exit."""
+        if hasattr(self, 'scene') and not sip.isdeleted(self.scene):
+            self.scene._clear_ongoing = True
+            try:
+                self.scene.selectionChanged.disconnect(self.on_selection_changed)
+                self.scene.changed.disconnect(self.on_scene_changed)
+            except TypeError:
+                pass
+            self.scene.clear()
+
     def update_window_title(self):
         clean = self.undo_stack.isClean()
         if clean and not self.filename:
@@ -130,18 +190,23 @@ class BeeGraphicsView(MainControlsMixin,
         self.parent.setWindowTitle(title)
 
     def on_scene_changed(self, region):
+        if sip.isdeleted(self.scene) or self.scene.in_batch_update or self.scene._clear_ongoing:
+            return
         if not self.scene.items():
             logger.debug('No items in scene')
             self.setTransform(QtGui.QTransform())
             self.welcome_overlay.setFocus()
             self.clearFocus()
             self.welcome_overlay.show()
+            if hasattr(self, 'traffic_lights') and self.traffic_lights.isVisible():
+                self.traffic_lights.raise_()
             self.actiongroup_set_enabled('active_when_items_in_scene', False)
         else:
-            self.setFocus()
-            self.welcome_overlay.clearFocus()
-            self.welcome_overlay.hide()
-            self.actiongroup_set_enabled('active_when_items_in_scene', True)
+            if not self.welcome_overlay.isHidden():
+                self.setFocus()
+                self.welcome_overlay.clearFocus()
+                self.welcome_overlay.hide()
+                self.actiongroup_set_enabled('active_when_items_in_scene', True)
         self.recalc_scene_rect()
 
     def on_can_redo_changed(self, can_redo):
@@ -153,12 +218,26 @@ class BeeGraphicsView(MainControlsMixin,
     def on_undo_clean_changed(self, clean):
         self.update_window_title()
 
+    def apply_theme(self, theme_name: str):
+        constants.set_active_theme(theme_name)
+        is_dark = (theme_name == 'dark')
+        self.setBackgroundBrush(
+            QtGui.QBrush(QtGui.QColor(*constants.COLORS['Scene:Canvas'])))
+        self.welcome_overlay.apply_theme()
+        if hasattr(self, 'traffic_lights'):
+            self.traffic_lights.set_theme(is_dark)
+        text_col = QtGui.QColor(*constants.COLORS['Scene:Text'])
+        for item in self.scene.items_by_type('text'):
+            item.setDefaultTextColor(text_col)
+        apply_dwm_window_shadow(self.parent, is_dark=is_dark)
+        self.viewport().update()
+
     def on_context_menu(self, point):
-        self.context_menu.exec(self.mapToGlobal(point))
+        PenartMenuController.popup(
+            self.context_menu, self.mapToGlobal(point), self)
 
     def get_supported_image_formats(self, cls):
         formats = []
-
         for f in cls.supportedImageFormats():
             string = f'*.{f.data().decode()}'
             formats.extend((string, string.upper()))
@@ -175,6 +254,7 @@ class BeeGraphicsView(MainControlsMixin,
         self.undo_stack.clear()
         self.filename = None
         self.setTransform(QtGui.QTransform())
+        self.on_scene_changed([])
 
     def reset_previous_transform(self, toggle_item=None):
         if (self.previous_transform
@@ -197,11 +277,12 @@ class BeeGraphicsView(MainControlsMixin,
         else:
             self.previous_transform = None
 
+        if rect.isEmpty():
+            return
+
         logger.debug(f'Fit view: {rect}')
         self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
         self.recalc_scene_rect()
-        # It seems to be more reliable when we fit a second time
-        # Sometimes a changing scene rect can mess up the fitting
         self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
         logger.trace('Fit view done')
 
@@ -240,9 +321,12 @@ class BeeGraphicsView(MainControlsMixin,
     def on_action_always_on_top(self, checked):
         self.parent.setWindowFlag(
             Qt.WindowType.WindowStaysOnTopHint, on=checked)
-        self.parent.destroy()
-        self.parent.create()
+        if sys.platform != 'win32':
+            self.parent.destroy()
+            self.parent.create()
         self.parent.show()
+        apply_dwm_window_shadow(
+            self.parent, is_dark=(constants.ACTIVE_THEME == 'dark'))
 
     def on_action_show_scrollbars(self, checked):
         if checked:
@@ -265,9 +349,17 @@ class BeeGraphicsView(MainControlsMixin,
     def on_action_show_titlebar(self, checked):
         self.parent.setWindowFlag(
             Qt.WindowType.FramelessWindowHint, on=not checked)
-        self.parent.destroy()
-        self.parent.create()
-        self.parent.show()
+        if sys.platform != 'win32':
+            self.parent.destroy()
+            self.parent.create()
+        if hasattr(self, 'traffic_lights'):
+            self.traffic_lights.setVisible(not checked)
+            if not checked:
+                self.traffic_lights.raise_()
+        if self.parent.isVisible():
+            self.parent.show()
+        apply_dwm_window_shadow(
+            self.parent, is_dark=(constants.ACTIVE_THEME == 'dark'))
 
     def on_action_move_window(self):
         if self.welcome_overlay.isHidden():
@@ -333,15 +425,17 @@ class BeeGraphicsView(MainControlsMixin,
         self.scene.arrange_square()
 
     def on_action_change_opacity(self):
-        images = list(filter(
-            lambda item: item.is_image,
-            self.scene.selectedItems(user_only=True)))
+        images = [
+            item for item in self.scene.selectedItems(user_only=True)
+            if item.is_image
+        ]
         widgets.ChangeOpacityDialog(self, images, self.undo_stack)
 
     def on_action_grayscale(self, checked):
-        images = list(filter(
-            lambda item: item.is_image,
-            self.scene.selectedItems(user_only=True)))
+        images = [
+            item for item in self.scene.selectedItems(user_only=True)
+            if item.is_image
+        ]
         if images:
             self.undo_stack.push(
                 commands.ToggleGrayscale(images, checked))
@@ -381,7 +475,8 @@ class BeeGraphicsView(MainControlsMixin,
             self.scene.selectedItems(user_only=True)))
 
     def on_action_show_color_gamut(self):
-        widgets.color_gamut.GamutDialog(self, self.scene.selectedItems()[0])
+        widgets.color_gamut.GamutDialog(
+            self, self.scene.selectedItems(user_only=True)[0])
 
     def on_action_sample_color(self):
         self.cancel_active_modes()
@@ -390,8 +485,6 @@ class BeeGraphicsView(MainControlsMixin,
         self.active_mode = self.SAMPLE_COLOR_MODE
 
         if self.scene.has_multi_selection():
-            # We don't want to sample the multi select item, so
-            # temporarily send it to the back:
             self.scene.multi_select_item.lower_behind_selection()
 
         pos = self.mapFromGlobal(self.cursor().pos())
@@ -401,7 +494,6 @@ class BeeGraphicsView(MainControlsMixin,
             self.scene.sample_color_at(self.mapToScene(pos)))
 
     def on_items_loaded(self, value):
-        logger.debug('On items loaded: add queued items')
         self.scene.add_queued_items()
 
     def on_loading_finished(self, filename, errors):
@@ -414,6 +506,7 @@ class BeeGraphicsView(MainControlsMixin,
         else:
             self.filename = filename
             self.scene.add_queued_items()
+            self.scene.take_pending_inserted_items()
             self.on_action_fit_scene()
 
     def on_action_open_recent_file(self, filename):
@@ -447,7 +540,7 @@ class BeeGraphicsView(MainControlsMixin,
         filename, f = QtWidgets.QFileDialog.getOpenFileName(
             parent=self,
             caption='Open file',
-            filter=f'{constants.APPNAME} File (*.bee)')
+            filter=f'{constants.APPNAME} / BeeRef File (*.bee)')
         if filename:
             filename = os.path.normpath(filename)
             self.open_from_file(filename)
@@ -592,23 +685,17 @@ class BeeGraphicsView(MainControlsMixin,
              f'<p>{constants.APPNAME_FULL}</p>'
              f'<p>{constants.COPYRIGHT}</p>'
              f'<p><a href="{constants.WEBSITE}">'
-             f'Visit the {constants.APPNAME} website</a></p>'))
+             f'Based on open-source BeeRef</a></p>'))
 
     def on_action_debuglog(self):
         widgets.DebugLogDialog(self)
 
     def on_insert_images_finished(self, new_scene, filename, errors):
-        """Callback for when loading of images is finished.
-
-        :param new_scene: True if the scene was empty before, else False
-        :param filename: Not used, for compatibility only
-        :param errors: List of filenames that couldn't be loaded
-        """
-
         logger.debug('Insert images finished')
         if errors:
-            errornames = [
-                f'<li>{fn}</li>' for fn in errors]
+            errornames = [f'<li>{fn}</li>' for fn in errors[:50]]
+            if len(errors) > 50:
+                errornames.append(f'<li>... and {len(errors) - 50} more</li>')
             errornames = '<ul>%s</ul>' % '\n'.join(errornames)
             num = len(errors)
             msg = f'{num} image(s) could not be opened.<br/>'
@@ -616,15 +703,25 @@ class BeeGraphicsView(MainControlsMixin,
                 self,
                 'Problem loading images',
                 msg + IMG_LOADING_ERROR_MSG + errornames)
+
         self.scene.add_queued_items()
-        self.scene.arrange_default()
+        inserted_items = self.scene.take_pending_inserted_items()
+        if inserted_items:
+            self.undo_stack.push(
+                commands.InsertItems(
+                    self.scene, inserted_items, ignore_first_redo=True))
+            self.scene.arrange_default()
         self.undo_stack.endMacro()
-        if new_scene:
+
+        if new_scene and self.scene.items():
             self.on_action_fit_scene()
 
     def do_insert_images(self, filenames, pos=None):
+        if not filenames:
+            return
         if not pos:
             pos = self.get_view_center()
+        self.scene.take_pending_inserted_items()
         self.scene.deselect_all_items()
         self.undo_stack.beginMacro('Insert Images')
         self.worker = fileio.ThreadedIO(
@@ -650,7 +747,8 @@ class BeeGraphicsView(MainControlsMixin,
             parent=self,
             caption='Select one or more images to open',
             filter=f'Images ({formats})')
-        self.do_insert_images(filenames)
+        if filenames:
+            self.do_insert_images(filenames)
 
     def on_action_insert_text(self):
         self.cancel_active_modes()
@@ -664,17 +762,11 @@ class BeeGraphicsView(MainControlsMixin,
         self.cancel_active_modes()
         clipboard = QtWidgets.QApplication.clipboard()
         items = self.scene.selectedItems(user_only=True)
+        if not items:
+            return
 
-        # At the moment, we can only copy one image to the global
-        # clipboard. (Later, we might create an image of the whole
-        # selection for external copying.)
         items[0].copy_to_clipboard(clipboard)
-
-        # However, we can copy all items to the internal clipboard:
         self.scene.copy_selection_to_internal_clipboard()
-
-        # We set a marker for ourselves in the global clipboard so
-        # that we know to look up the internal clipboard when pasting:
         clipboard.mimeData().setData(
             'beeref/items', QtCore.QByteArray.number(len(items)))
 
@@ -684,12 +776,8 @@ class BeeGraphicsView(MainControlsMixin,
         clipboard = QtWidgets.QApplication.clipboard()
         pos = self.mapToScene(self.mapFromGlobal(self.cursor().pos()))
 
-        # See if we need to look up the internal clipboard:
         data = clipboard.mimeData().data('beeref/items')
-        logger.debug(f'Custom data in clipboard: {data}')
         if data and self.scene.internal_clipboard:
-            # Checking that internal clipboard exists since the user
-            # may have opened a new scene since copying.
             self.scene.paste_from_internal_clipboard(pos)
             return
 
@@ -698,7 +786,6 @@ class BeeGraphicsView(MainControlsMixin,
             item = BeePixmapItem(img)
             self.undo_stack.push(commands.InsertItems(self.scene, [item], pos))
             if len(self.scene.items()) == 1:
-                # This is the first image in the scene
                 self.on_action_fit_scene()
             return
         text = clipboard.text()
@@ -718,18 +805,21 @@ class BeeGraphicsView(MainControlsMixin,
             QtCore.QUrl.fromLocalFile(dirname))
 
     def on_selection_changed(self):
-        logger.debug('Currently selected items: %s',
-                     len(self.scene.selectedItems(user_only=True)))
-        self.actiongroup_set_enabled('active_when_selection',
-                                     self.scene.has_selection())
-        self.actiongroup_set_enabled('active_when_single_image',
-                                     self.scene.has_single_image_selection())
+        if sip.isdeleted(self.scene) or self.scene.in_batch_update or self.scene._clear_ongoing:
+            return
+        has_sel = self.scene.has_selection()
+        self.actiongroup_set_enabled('active_when_selection', has_sel)
+        self.actiongroup_set_enabled(
+            'active_when_single_image',
+            self.scene.has_single_image_selection())
 
-        if self.scene.has_selection():
-            item = self.scene.selectedItems(user_only=True)[0]
-            grayscale = getattr(item, 'grayscale', False)
-            actions.actions['grayscale'].qaction.setChecked(grayscale)
-        self.viewport().repaint()
+        if has_sel:
+            for item in self.scene.selectedItems():
+                if hasattr(item, 'save_id'):
+                    grayscale = getattr(item, 'grayscale', False)
+                    actions.actions['grayscale'].qaction.setChecked(grayscale)
+                    break
+        self.viewport().update()
 
     def on_cursor_changed(self, cursor):
         if self.active_mode is None:
@@ -740,46 +830,27 @@ class BeeGraphicsView(MainControlsMixin,
             self.viewport().unsetCursor()
 
     def recalc_scene_rect(self):
-        """Resize the scene rectangle so that it is always one view width
-        wider than all items' bounding box at each side and one view
-        width higher on top and bottom. This gives the impression of
-        an infinite canvas."""
-
+        """Resize scene rectangle using O(1) cached itemsBoundingRect."""
         if self.previous_transform:
             return
-        logger.trace('Recalculating scene rectangle...')
+        bounds = self.scene.itemsBoundingRect()
         try:
-            topleft = self.mapFromScene(
-                self.scene.itemsBoundingRect().topLeft())
+            topleft = self.mapFromScene(bounds.topLeft())
             topleft = self.mapToScene(QtCore.QPoint(
                 topleft.x() - self.size().width(),
                 topleft.y() - self.size().height()))
-            bottomright = self.mapFromScene(
-                self.scene.itemsBoundingRect().bottomRight())
+            bottomright = self.mapFromScene(bounds.bottomRight())
             bottomright = self.mapToScene(QtCore.QPoint(
                 bottomright.x() + self.size().width(),
                 bottomright.y() + self.size().height()))
             self.setSceneRect(QtCore.QRectF(topleft, bottomright))
         except OverflowError:
             logger.info('Maximum scene size reached')
-        logger.trace('Done recalculating scene rectangle')
 
     def get_zoom_size(self, func):
-        """Calculates the size of all items' bounding box in the view's
-        coordinates.
-
-        This helps ensure that we never zoom out too much (scene
-        becomes so tiny that items become invisible) or zoom in too
-        much (causing overflow errors).
-
-        :param func: Function which takes the width and height as
-            arguments and turns it into a number, for ex. ``min`` or ``max``.
-        """
-
-        topleft = self.mapFromScene(
-            self.scene.itemsBoundingRect().topLeft())
-        bottomright = self.mapFromScene(
-            self.scene.itemsBoundingRect().bottomRight())
+        bounds = self.scene.itemsBoundingRect()
+        topleft = self.mapFromScene(bounds.topLeft())
+        bottomright = self.mapFromScene(bounds.bottomRight())
         return func(bottomright.x() - topleft.x(),
                     bottomright.y() - topleft.y())
 
@@ -793,9 +864,7 @@ class BeeGraphicsView(MainControlsMixin,
 
     def pan(self, delta):
         if not self.scene.items():
-            logger.debug('No items in scene; ignore pan')
             return
-
         hscroll = self.horizontalScrollBar()
         hscroll.setValue(int(hscroll.value() + delta.x()))
         vscroll = self.verticalScrollBar()
@@ -803,16 +872,9 @@ class BeeGraphicsView(MainControlsMixin,
 
     def zoom(self, delta, anchor):
         if not self.scene.items():
-            logger.debug('No items in scene; ignore zoom')
             return
 
-        # We calculate where the anchor is before and after the zoom
-        # and then move the view accordingly to keep the anchor fixed
-        # We can't use QGraphicsView's AnchorUnderMouse since it
-        # uses the current cursor position while we need the initial mouse
-        # press position for zooming with Ctrl + Middle Drag
-        anchor = QtCore.QPoint(round(anchor.x()),
-                               round(anchor.y()))
+        anchor = QtCore.QPoint(round(anchor.x()), round(anchor.y()))
         ref_point = self.mapToScene(anchor)
         if delta == 0:
             return
@@ -821,21 +883,19 @@ class BeeGraphicsView(MainControlsMixin,
             if self.get_zoom_size(max) < 10000000:
                 self.scale(factor, factor)
             else:
-                logger.debug('Maximum zoom size reached')
                 return
         else:
             if self.get_zoom_size(min) > 50:
-                self.scale(1/factor, 1/factor)
+                self.scale(1 / factor, 1 / factor)
             else:
-                logger.debug('Minimum zoom size reached')
                 return
 
         self.pan(self.mapFromScene(ref_point) - anchor)
         self.reset_previous_transform()
 
     def wheelEvent(self, event):
-        action, inverted\
-            = self.keyboard_settings.mousewheel_action_for_event(event)
+        action, inverted = (
+            self.keyboard_settings.mousewheel_action_for_event(event))
 
         delta = event.angleDelta().y()
         if inverted:
@@ -854,12 +914,36 @@ class BeeGraphicsView(MainControlsMixin,
             event.accept()
             return
 
+    def _is_frameless(self) -> bool:
+        return bool(
+            self.parent.windowFlags() & Qt.WindowType.FramelessWindowHint)
+
     def mousePressEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._is_frameless()
+                and not self.parent.isMaximized()
+                and not self.parent.isFullScreen()):
+            win_pos = self.mapTo(self.parent, event.pos())
+            edges = detect_resize_edges(self.parent.rect(), win_pos, margin=6)
+            wh = self.parent.windowHandle()
+            if edges and wh is not None:
+                wh.startSystemResize(edges)
+                event.accept()
+                return
+            # Allow dragging window smoothly by top 28px empty header area
+            if win_pos.y() <= 28 and wh is not None:
+                item_here = self.scene.itemAt(
+                    self.mapToScene(event.pos()), self.transform())
+                if item_here is None:
+                    wh.startSystemMove()
+                    event.accept()
+                    return
+
         if self.mousePressEventMainControls(event):
             return
 
         if self.active_mode == self.SAMPLE_COLOR_MODE:
-            if (event.button() == Qt.MouseButton.LeftButton):
+            if event.button() == Qt.MouseButton.LeftButton:
                 color = self.scene.sample_color_at(
                     self.mapToScene(event.pos()))
                 if color:
@@ -868,10 +952,7 @@ class BeeGraphicsView(MainControlsMixin,
                     clipboard.setText(name)
                     self.scene.internal_clipboard = []
                     msg = f'Copied color to clipboard: {name}'
-                    logger.debug(msg)
                     widgets.BeeNotification(self, msg)
-                else:
-                    logger.debug('No color found')
             self.cancel_sample_color_mode()
             event.accept()
             return
@@ -887,13 +968,9 @@ class BeeGraphicsView(MainControlsMixin,
             return
 
         if action == 'pan':
-            logger.trace('Begin pan')
             self.active_mode = self.PAN_MODE
             self.event_start = event.position()
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
-            # ClosedHandCursor and OpenHandCursor don't work, but I
-            # don't know if that's only on my system or a general
-            # problem. It works with other cursors.
             event.accept()
             return
 
@@ -926,13 +1003,27 @@ class BeeGraphicsView(MainControlsMixin,
             event.accept()
             return
 
+        if (self.active_mode is None
+                and self._is_frameless()
+                and not self.parent.isMaximized()
+                and not self.parent.isFullScreen()):
+            win_pos = self.mapTo(self.parent, event.pos())
+            edges = detect_resize_edges(self.parent.rect(), win_pos, margin=6)
+            edge_cur = cursor_for_edges(edges)
+            if edge_cur is not None:
+                self.viewport().setCursor(edge_cur)
+                self._resize_cursor_active = True
+                return
+            elif getattr(self, '_resize_cursor_active', False):
+                self._resize_cursor_active = False
+                self.viewport().unsetCursor()
+
         if self.mouseMoveEventMainControls(event):
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self.active_mode == self.PAN_MODE:
-            logger.trace('End pan')
             self.viewport().unsetCursor()
             self.active_mode = None
             event.accept()
@@ -949,6 +1040,8 @@ class BeeGraphicsView(MainControlsMixin,
         super().resizeEvent(event)
         self.recalc_scene_rect()
         self.welcome_overlay.resize(self.size())
+        if hasattr(self, 'traffic_lights') and self.traffic_lights.isVisible():
+            self.traffic_lights.raise_()
 
     def keyPressEvent(self, event):
         if self.keyPressEventMainControls(event):

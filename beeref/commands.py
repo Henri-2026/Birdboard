@@ -1,4 +1,4 @@
-# This file is part of BeeRef.
+# This file is part of Birdboard (based on BeeRef).
 #
 # BeeRef is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -13,7 +13,19 @@
 # You should have received a copy of the GNU General Public License
 # along with BeeRef.  If not, see <https://www.gnu.org/licenses/>.
 
+from contextlib import nullcontext
 from PyQt6 import QtCore, QtGui
+
+
+def _scene_batch(items_or_scene):
+    scene = None
+    if hasattr(items_or_scene, 'batch_update'):
+        scene = items_or_scene
+    elif items_or_scene:
+        first = next(iter(items_or_scene), None)
+        if first is not None and callable(getattr(first, 'scene', None)):
+            scene = first.scene()
+    return scene.batch_update() if scene is not None else nullcontext()
 
 
 class InsertItems(QtGui.QUndoCommand):
@@ -30,49 +42,54 @@ class InsertItems(QtGui.QUndoCommand):
             self.ignore_first_redo = False
             return
 
-        self.scene.deselect_all_items()
-        if self.position:
-            self.old_positions = []
-            rect = self.scene.itemsBoundingRect(items=self.items)
+        with self.scene.batch_update():
+            self.scene.deselect_all_items()
+            if self.position and self.items:
+                self.old_positions = []
+                rect = self.scene.itemsBoundingRect(items=self.items)
+                offset = self.position - rect.center()
+                for item in self.items:
+                    self.old_positions.append(item.pos())
+                    item.setPos(item.pos() + offset)
             for item in self.items:
-                self.old_positions.append(item.pos())
-                item.setPos(item.pos() + self.position - rect.center())
-        for item in self.items:
-            self.scene.addItem(item)
-            item.setSelected(True)
-            item.bring_to_front()
+                self.scene.addItem(item)
+                item.setSelected(True)
+                item.bring_to_front()
 
     def undo(self):
-        self.scene.deselect_all_items()
-        for item in self.items:
-            self.scene.removeItem(item)
-        if self.position:
-            for item, pos in zip(self.items, self.old_positions):
-                item.setPos(pos)
+        with self.scene.batch_update():
+            self.scene.deselect_all_items()
+            for item in self.items:
+                self.scene.removeItem(item)
+            if self.position and hasattr(self, 'old_positions'):
+                for item, pos in zip(self.items, self.old_positions):
+                    item.setPos(pos)
 
 
 class DeleteItems(QtGui.QUndoCommand):
     def __init__(self, scene, items):
         super().__init__('Delete items')
         self.scene = scene
-        self.items = items
+        self.items = list(items)
 
     def redo(self):
-        for item in self.items:
-            self.scene.removeItem(item)
+        with self.scene.batch_update():
+            for item in self.items:
+                self.scene.removeItem(item)
 
     def undo(self):
-        self.scene.deselect_all_items()
-        for item in self.items:
-            item.setSelected(True)
-            self.scene.addItem(item)
+        with self.scene.batch_update():
+            self.scene.deselect_all_items()
+            for item in self.items:
+                self.scene.addItem(item)
+                item.setSelected(True)
 
 
 class MoveItemsBy(QtGui.QUndoCommand):
 
     def __init__(self, items, delta, ignore_first_redo=False):
         super().__init__('Move items')
-        self.items = items
+        self.items = [i for i in items if hasattr(i, 'save_id')]
         self.delta = delta
         self.ignore_first_redo = ignore_first_redo
 
@@ -80,12 +97,16 @@ class MoveItemsBy(QtGui.QUndoCommand):
         if self.ignore_first_redo:
             self.ignore_first_redo = False
             return
-        for item in self.items:
-            item.moveBy(self.delta.x(), self.delta.y())
+        dx, dy = self.delta.x(), self.delta.y()
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.moveBy(dx, dy)
 
     def undo(self):
-        for item in self.items:
-            item.moveBy(-self.delta.x(), -self.delta.y())
+        dx, dy = -self.delta.x(), -self.delta.y()
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.moveBy(dx, dy)
 
 
 class ScaleItemsBy(QtGui.QUndoCommand):
@@ -94,7 +115,7 @@ class ScaleItemsBy(QtGui.QUndoCommand):
     def __init__(self, items, factor, anchor, ignore_first_redo=False):
         super().__init__('Scale items')
         self.ignore_first_redo = ignore_first_redo
-        self.items = items
+        self.items = [i for i in items if hasattr(i, 'save_id')]
         self.factor = factor
         self.anchor = anchor
 
@@ -102,14 +123,16 @@ class ScaleItemsBy(QtGui.QUndoCommand):
         if self.ignore_first_redo:
             self.ignore_first_redo = False
             return
-        for item in self.items:
-            item.setScale(item.scale() * self.factor,
-                          item.mapFromScene(self.anchor))
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.setScale(item.scale() * self.factor,
+                              item.mapFromScene(self.anchor))
 
     def undo(self):
-        for item in self.items:
-            item.setScale(item.scale() / self.factor,
-                          item.mapFromScene(self.anchor))
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.setScale(item.scale() / self.factor,
+                              item.mapFromScene(self.anchor))
 
 
 class RotateItemsBy(QtGui.QUndoCommand):
@@ -118,7 +141,7 @@ class RotateItemsBy(QtGui.QUndoCommand):
     def __init__(self, items, delta, anchor, ignore_first_redo=False):
         super().__init__('Rotate items')
         self.ignore_first_redo = ignore_first_redo
-        self.items = items
+        self.items = [i for i in items if hasattr(i, 'save_id')]
         self.delta = delta
         self.anchor = anchor
 
@@ -126,46 +149,51 @@ class RotateItemsBy(QtGui.QUndoCommand):
         if self.ignore_first_redo:
             self.ignore_first_redo = False
             return
-        for item in self.items:
-            item.setRotation(
-                item.rotation() + self.delta * item.flip(),
-                item.mapFromScene(self.anchor))
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.setRotation(
+                    item.rotation() + self.delta * item.flip(),
+                    item.mapFromScene(self.anchor))
 
     def undo(self):
-        for item in self.items:
-            item.setRotation(item.rotation() - self.delta * item.flip(),
-                             item.mapFromScene(self.anchor))
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.setRotation(item.rotation() - self.delta * item.flip(),
+                                 item.mapFromScene(self.anchor))
 
 
 class NormalizeItems(QtGui.QUndoCommand):
 
     def __init__(self, items, scale_factors):
         super().__init__('Normalize items')
-        self.items = items
-        self.scale_factors = scale_factors
+        self.items = list(items)
+        self.scale_factors = list(scale_factors)
 
     def redo(self):
         self.old_scale_factors = []
-        for item, factor in zip(self.items, self.scale_factors):
-            self.old_scale_factors.append(item.scale())
-            item.setScale(item.scale() * factor, item.center)
+        with _scene_batch(self.items):
+            for item, factor in zip(self.items, self.scale_factors):
+                self.old_scale_factors.append(item.scale())
+                item.setScale(item.scale() * factor, item.center)
 
     def undo(self):
-        for item, factor in zip(self.items, self.old_scale_factors):
-            item.setScale(factor, item.center)
+        with _scene_batch(self.items):
+            for item, factor in zip(self.items, self.old_scale_factors):
+                item.setScale(factor, item.center)
 
 
 class FlipItems(QtGui.QUndoCommand):
 
     def __init__(self, items, anchor, vertical):
         super().__init__('Flip items')
-        self.items = items
+        self.items = [i for i in items if hasattr(i, 'save_id')]
         self.anchor = anchor
         self.vertical = vertical
 
     def redo(self):
-        for item in self.items:
-            item.do_flip(self.vertical, item.mapFromScene(self.anchor))
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.do_flip(self.vertical, item.mapFromScene(self.anchor))
 
     def undo(self):
         self.redo()
@@ -175,53 +203,59 @@ class ResetScale(QtGui.QUndoCommand):
 
     def __init__(self, items):
         super().__init__('Reset Scale')
-        self.items = items
+        self.items = list(items)
 
     def redo(self):
         self.old_scale_factors = []
-        for item in self.items:
-            self.old_scale_factors.append(item.scale())
-            item.setScale(1, anchor=item.center)
+        with _scene_batch(self.items):
+            for item in self.items:
+                self.old_scale_factors.append(item.scale())
+                item.setScale(1, anchor=item.center)
 
     def undo(self):
-        for item, scale_factor in zip(self.items, self.old_scale_factors):
-            item.setScale(scale_factor, anchor=item.center)
+        with _scene_batch(self.items):
+            for item, scale_factor in zip(self.items, self.old_scale_factors):
+                item.setScale(scale_factor, anchor=item.center)
 
 
 class ResetRotation(QtGui.QUndoCommand):
 
     def __init__(self, items):
         super().__init__('Reset Rotation')
-        self.items = items
+        self.items = list(items)
 
     def redo(self):
         self.old_rotations = []
-        for item in self.items:
-            self.old_rotations.append(item.rotation())
-            item.setRotation(0, anchor=item.center)
+        with _scene_batch(self.items):
+            for item in self.items:
+                self.old_rotations.append(item.rotation())
+                item.setRotation(0, anchor=item.center)
 
     def undo(self):
-        for item, rotation in zip(self.items, self.old_rotations):
-            item.setRotation(rotation, anchor=item.center)
+        with _scene_batch(self.items):
+            for item, rotation in zip(self.items, self.old_rotations):
+                item.setRotation(rotation, anchor=item.center)
 
 
 class ResetFlip(QtGui.QUndoCommand):
 
     def __init__(self, items):
         super().__init__('Reset Flip')
-        self.items = items
+        self.items = list(items)
 
     def redo(self):
         self.old_flips = []
-        for item in self.items:
-            self.old_flips.append(item.flip())
-            if item.flip() == -1:
-                item.do_flip(anchor=item.center)
+        with _scene_batch(self.items):
+            for item in self.items:
+                self.old_flips.append(item.flip())
+                if item.flip() == -1:
+                    item.do_flip(anchor=item.center)
 
     def undo(self):
-        for item, flip in zip(self.items, self.old_flips):
-            if flip == -1:
-                item.do_flip(anchor=item.center)
+        with _scene_batch(self.items):
+            for item, flip in zip(self.items, self.old_flips):
+                if flip == -1:
+                    item.do_flip(anchor=item.center)
 
 
 class ResetCrop(QtGui.QUndoCommand):
@@ -232,47 +266,51 @@ class ResetCrop(QtGui.QUndoCommand):
 
     def redo(self):
         self.old_crops = []
-        for item in self.items:
-            self.old_crops.append(item.crop)
-            item.reset_crop()
+        with _scene_batch(self.items):
+            for item in self.items:
+                self.old_crops.append(item.crop)
+                item.reset_crop()
 
     def undo(self):
-        for item, crop in zip(self.items, self.old_crops):
-            item.crop = crop
+        with _scene_batch(self.items):
+            for item, crop in zip(self.items, self.old_crops):
+                item.crop = crop
 
 
 class ResetTransforms(QtGui.QUndoCommand):
 
     def __init__(self, items):
         super().__init__('Reset All Transformations')
-        self.items = items
+        self.items = list(items)
 
     def redo(self):
         self.old_values = []
-        for item in self.items:
-            values = {
-                'scale': item.scale(),
-                'rotation': item.rotation(),
-                'flip': item.flip(),
-            }
-            if item.is_image:
-                values['crop'] = item.crop
-                item.reset_crop()
-            self.old_values.append(values)
+        with _scene_batch(self.items):
+            for item in self.items:
+                values = {
+                    'scale': item.scale(),
+                    'rotation': item.rotation(),
+                    'flip': item.flip(),
+                }
+                if item.is_image:
+                    values['crop'] = item.crop
+                    item.reset_crop()
+                self.old_values.append(values)
 
-            item.setScale(1, anchor=item.center)
-            item.setRotation(0, anchor=item.center)
-            if item.flip() == -1:
-                item.do_flip(anchor=item.center)
+                item.setScale(1, anchor=item.center)
+                item.setRotation(0, anchor=item.center)
+                if item.flip() == -1:
+                    item.do_flip(anchor=item.center)
 
     def undo(self):
-        for item, old in zip(self.items, self.old_values):
-            item.setScale(old['scale'], anchor=item.center)
-            item.setRotation(old['rotation'], anchor=item.center)
-            if old['flip'] == -1:
-                item.do_flip(anchor=item.center)
-            if item.is_image:
-                item.crop = old['crop']
+        with _scene_batch(self.items):
+            for item, old in zip(self.items, self.old_values):
+                item.setScale(old['scale'], anchor=item.center)
+                item.setRotation(old['rotation'], anchor=item.center)
+                if old['flip'] == -1:
+                    item.do_flip(anchor=item.center)
+                if item.is_image:
+                    item.crop = old['crop']
 
 
 class ArrangeItems(QtGui.QUndoCommand):
@@ -280,21 +318,23 @@ class ArrangeItems(QtGui.QUndoCommand):
     def __init__(self, scene, items, positions):
         super().__init__('Arrange items')
         self.scene = scene
-        self.items = items
-        self.positions = positions
+        self.items = list(items)
+        self.positions = list(positions)
 
     def redo(self):
         self.old_positions = []
-        for item, pos in zip(self.items, self.positions):
-            self.old_positions.append(item.pos())
-            orig_topleft = item.mapToScene(QtCore.QPointF(0, 0))
-            rect_topleft = self.scene.itemsBoundingRect(
-                items=[item]).topLeft()
-            item.setPos(pos + orig_topleft - rect_topleft)
+        with self.scene.batch_update():
+            for item, pos in zip(self.items, self.positions):
+                self.old_positions.append(item.pos())
+                orig_topleft = item.mapToScene(QtCore.QPointF(0, 0))
+                rect_topleft = item.sceneTransform().mapRect(
+                    item.bounding_rect_unselected()).topLeft()
+                item.setPos(pos + orig_topleft - rect_topleft)
 
     def undo(self):
-        for item, pos in zip(self.items, self.old_positions):
-            item.setPos(pos)
+        with self.scene.batch_update():
+            for item, pos in zip(self.items, self.old_positions):
+                item.setPos(pos)
 
 
 class CropItem(QtGui.QUndoCommand):
@@ -332,21 +372,22 @@ class ChangeOpacity(QtGui.QUndoCommand):
     def __init__(self, items, opacity, ignore_first_redo=False):
         super().__init__('Change Opacity')
         self.ignore_first_redo = ignore_first_redo
-        self.items = list(filter(lambda item: item.is_image, items))
+        self.items = [item for item in items if item.is_image]
         self.opacity = opacity
-        self.old_opacities = [item.opacity() for item in items]
+        self.old_opacities = [item.opacity() for item in self.items]
 
     def redo(self):
         if self.ignore_first_redo:
             self.ignore_first_redo = False
             return
-
-        for item in self.items:
-            item.setOpacity(self.opacity)
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.setOpacity(self.opacity)
 
     def undo(self):
-        for item, opacity in zip(self.items, self.old_opacities):
-            item.setOpacity(opacity)
+        with _scene_batch(self.items):
+            for item, opacity in zip(self.items, self.old_opacities):
+                item.setOpacity(opacity)
 
 
 class ToggleGrayscale(QtGui.QUndoCommand):
@@ -354,14 +395,16 @@ class ToggleGrayscale(QtGui.QUndoCommand):
 
     def __init__(self, items, grayscale):
         super().__init__('Toggle Grayscale')
-        self.items = list(filter(lambda item: item.is_image, items))
+        self.items = [item for item in items if item.is_image]
         self.grayscale = grayscale
-        self.old_grayscales = [item.grayscale for item in items]
+        self.old_grayscales = [item.grayscale for item in self.items]
 
     def redo(self):
-        for item in self.items:
-            item.grayscale = self.grayscale
+        with _scene_batch(self.items):
+            for item in self.items:
+                item.grayscale = self.grayscale
 
     def undo(self):
-        for item, grayscale in zip(self.items, self.old_grayscales):
-            item.grayscale = grayscale
+        with _scene_batch(self.items):
+            for item, grayscale in zip(self.items, self.old_grayscales):
+                item.grayscale = grayscale

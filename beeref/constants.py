@@ -1,47 +1,70 @@
-# This file is part of BeeRef.
-#
-# BeeRef is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# BeeRef is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with BeeRef.  If not, see <https://www.gnu.org/licenses/>.
+# This file is part of Birdboard (based on BeeRef, GPL-3.0-or-later).
 
-APPNAME = 'BeeRef'
-APPNAME_FULL = f'{APPNAME} Reference Image Viewer'
-VERSION = '0.3.4-dev'
-WEBSITE = 'https://github.com/rbreu/beeref'
-COPYRIGHT = 'Copyright © 2021-2024 Rebecca Breu'
+APPNAME = 'Birdboard'
+APPNAME_FULL = f'{APPNAME} Reference Board'
+VERSION = '1.0.0'
+WEBSITE = 'https://github.com/Henri-2026/Birdboard'
+COPYRIGHT = 'Birdboard v1.0.0 (based on open-source BeeRef)'
 
 CHANGED_SYMBOL = '✎'
 
-COLORS = {
-    # Qt:
-    'Active:Base': (60, 60, 60),
-    'Active:AlternateBase': (70, 70, 70),
-    'Active:Window': (40, 40, 40),
-    'Active:Button': (40, 40, 40),
-    'Active:Text': (200, 200, 200),
-    'Active:HighlightedText': (255, 255, 255),
-    'Active:WindowText': (200, 200, 200),
-    'Active:ButtonText': (200, 200, 200),
-    'Active:Highlight': (83, 167, 165),
-    'Active:Link': (90, 181, 179),
-
-    'Disabled:Base': (40, 40, 40),
-    'Disabled:Window': (40, 40, 40, 50),
-    'Disabled:WindowText': (120, 120, 120),
-    'Disabled:Light': (0, 0, 0, 0),
-    'Disabled:Text': (140, 140, 140),
-
-    # BeeRef specific:
-    'Scene:Selection': (116, 234, 231),
-    'Scene:Canvas': (60, 60, 60),
-    'Scene:Text': (200, 200, 200),
+THEMES = {
+    'light': {
+        'Scene:Canvas': (233, 234, 236),      # #E9EAEC Studio Light Gray
+        'Scene:Text': (28, 28, 34),           # #1C1C22 Crisp Dark Ink
+        'Scene:Selection': (58, 130, 247),    # #3A82F7 Penart Accent Blue
+        'Welcome:Bg': '#E9EAEC',
+        'Welcome:TextPrimary': '#27272A',
+        'Welcome:TextSecondary': '#71717A',
+    },
+    'dark': {
+        'Scene:Canvas': (26, 26, 29),         # #1A1A1D Penart Matte Dark
+        'Scene:Text': (242, 242, 247),        # #F2F2F7 Penart Primary Text
+        'Scene:Selection': (58, 130, 247),    # #3A82F7 Penart Accent Blue
+        'Welcome:Bg': '#1A1A1D',
+        'Welcome:TextPrimary': '#F2F2F7',
+        'Welcome:TextSecondary': '#9A9AA2',
+    },
 }
+
+ACTIVE_THEME = 'light'
+
+COLORS = {
+    # Legacy keys updated dynamically by set_active_theme()
+    'Active:Base': (250, 250, 252),
+    'Active:AlternateBase': (240, 240, 244),
+    'Active:Window': (233, 234, 236),
+    'Active:Button': (242, 242, 246),
+    'Active:Text': (28, 28, 34),
+    'Active:HighlightedText': (255, 255, 255),
+    'Active:WindowText': (28, 28, 34),
+    'Active:ButtonText': (28, 28, 34),
+    'Active:Highlight': (58, 130, 247),
+    'Active:Link': (58, 130, 247),
+
+    'Disabled:Base': (235, 235, 238),
+    'Disabled:Window': (233, 234, 236, 120),
+    'Disabled:WindowText': (154, 154, 162),
+    'Disabled:Light': (0, 0, 0, 0),
+    'Disabled:Text': (154, 154, 162),
+
+    'Scene:Selection': (58, 130, 247),
+    'Scene:Canvas': (233, 234, 236),
+    'Scene:Text': (28, 28, 34),
+}
+
+
+def set_active_theme(theme_name: str) -> dict:
+    global ACTIVE_THEME
+    if theme_name not in THEMES:
+        theme_name = 'light'
+    ACTIVE_THEME = theme_name
+    t = THEMES[theme_name]
+    COLORS['Scene:Canvas'] = t['Scene:Canvas']
+    COLORS['Scene:Text'] = t['Scene:Text']
+    COLORS['Scene:Selection'] = t['Scene:Selection']
+    return t
+
+
+def get_active_theme() -> dict:
+    return THEMES.get(ACTIVE_THEME, THEMES['light'])

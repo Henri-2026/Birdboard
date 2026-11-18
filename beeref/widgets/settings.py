@@ -180,24 +180,39 @@ class AllocationLimitWidget(IntegerGroup):
 class ConfirmCloseUnsavedWidget(SingleCheckboxGroup):
     TITLE = 'Confirm when closing an unsaved file:'
     HELPTEXT = (
-        'When about to close an unsaved file, should BeeRef ask for '
+        'When about to close an unsaved file, should Birdboard ask for '
         'confirmation?')
     LABEL = 'Confirm when closing'
     KEY = 'Save/confirm_close_unsaved'
+
+
+class CanvasThemeWidget(RadioGroup):
+    TITLE = 'Canvas Theme:'
+    HELPTEXT = ('Choose between Studio Light Gray (#E9EAEC) and Penart '
+                'Matte Dark (#1A1A1D) canvas appearance.')
+    KEY = 'View/theme'
+    OPTIONS = (
+        ('light', 'Light Mode (#E9EAEC)',
+         'Soft neutral light gray studio background'),
+        ('dark', 'Dark Mode (#1A1A1D)',
+         'Penart matte dark background'),
+    )
 
 
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle(f'{constants.APPNAME} Settings')
+        self.setMinimumWidth(520)
         tabs = QtWidgets.QTabWidget()
 
-        # Miscellaneous
+        # Appearance & Miscellaneous
         misc = QtWidgets.QWidget()
         misc_layout = QtWidgets.QGridLayout()
         misc.setLayout(misc_layout)
-        misc_layout.addWidget(ConfirmCloseUnsavedWidget(), 0, 0)
-        tabs.addTab(misc, '&Miscellaneous')
+        misc_layout.addWidget(CanvasThemeWidget(), 0, 0)
+        misc_layout.addWidget(ConfirmCloseUnsavedWidget(), 0, 1)
+        tabs.addTab(misc, '&Appearance && General')
 
         # Images & Items
         items = QtWidgets.QWidget()

@@ -1,4 +1,4 @@
-# This file is part of BeeRef.
+# This file is part of Birdboard (based on BeeRef).
 #
 # BeeRef is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -20,7 +20,9 @@ text).
 from collections import defaultdict
 from functools import cached_property
 import logging
+import math
 import os.path
+import pathlib
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt
@@ -28,6 +30,17 @@ from PyQt6.QtCore import Qt
 from beeref import commands
 from beeref.config import BeeSettings
 from beeref.constants import COLORS
+from beeref.lod_cache import (
+    LODCacheManager,
+    LODImagePayload,
+    LOD_MID_MAX,
+    LOD_THUMB_MAX,
+    build_payload_from_bytes,
+    decode_from_bytes,
+    decode_from_path,
+    encode_thumb_jpeg_or_png,
+    fetch_sqlar_blob,
+)
 from beeref.selection import SelectableMixin
 
 
@@ -90,8 +103,9 @@ class BeeItemMixin(SelectableMixin):
 
     def on_selected_change(self, value):
         if (value and self.scene()
+                and not self.scene().in_batch_update
                 and not self.scene().has_selection()
-                and not self.scene().active_mode is None):
+                and self.scene().active_mode is not None):
             self.bring_to_front()
 
     def update_from_data(self, **kwargs):
@@ -107,27 +121,100 @@ class BeeItemMixin(SelectableMixin):
 
 @register_item
 class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
-    """Class for images added by the user."""
+    """High-performance LOD-backed image item for massive reference boards."""
 
     TYPE = 'pixmap'
     CROP_HANDLE_SIZE = 15
 
-    def __init__(self, image, filename=None, **kwargs):
-        super().__init__(QtGui.QPixmap.fromImage(image))
+    def __init__(self, image=None, filename=None, payload: LODImagePayload | None = None, **kwargs):
+        super().__init__()
         self.save_id = None
         self.filename = filename
-        self.reset_crop()
-        logger.debug(f'Initialized {self}')
         self.is_image = True
         self.crop_mode = False
-        self.init_selectable()
         self.settings = BeeSettings()
-        self.grayscale = False
+        self._grayscale = False
+        self._gray_cache: tuple[int, QtGui.QPixmap] | None = None
+
+        self._orig_width = 0
+        self._orig_height = 0
+        self._exif_trans = 0
+        self._img_format = ''
+        self._source_path: str | None = filename if (filename and os.path.exists(str(filename))) else None
+        self._source_bytes: bytes | None = None
+        self._bee_source: tuple[str, int] | None = None
+        self.thumb_pixmap = QtGui.QPixmap()
+
+        if payload is not None:
+            self._apply_lod_payload(payload)
+        elif image is not None and not image.isNull():
+            self._init_from_qimage(image)
+        else:
+            self._crop = QtCore.QRectF(0, 0, 0, 0)
+
+        self.init_selectable()
+        logger.debug(f'Initialized {self}')
 
     @classmethod
-    def create_from_data(self, **kwargs):
-        item = kwargs.pop('item')
+    def from_lod_payload(cls, payload: LODImagePayload, filename=None) -> 'BeePixmapItem':
+        return cls(image=None, filename=filename or payload.source_path, payload=payload)
+
+    def _apply_lod_payload(self, payload: LODImagePayload):
+        self._orig_width = payload.orig_width
+        self._orig_height = payload.orig_height
+        self._exif_trans = payload.exif_trans
+        self._img_format = payload.img_format
+        if payload.source_path:
+            self._source_path = payload.source_path
+        self._source_bytes = payload.source_bytes
+        self._bee_source = payload.bee_source
+        self.thumb_pixmap = QtGui.QPixmap.fromImage(payload.thumb_image)
+        self._gray_cache = None
+        self.reset_crop()
+
+    def _init_from_qimage(self, image: QtGui.QImage):
+        self._orig_width = image.width()
+        self._orig_height = image.height()
+        max_dim = max(self._orig_width, self._orig_height)
+        if max_dim > LOD_THUMB_MAX:
+            thumb_img = image.scaled(
+                LOD_THUMB_MAX,
+                LOD_THUMB_MAX,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.thumb_pixmap = QtGui.QPixmap.fromImage(thumb_img)
+            # Put full pixmap into bounded LRU cache
+            LODCacheManager.instance().put_full_pixmap(
+                self, QtGui.QPixmap.fromImage(image))
+            # If image has no disk file backing (e.g. pasted from clipboard),
+            # store compressed bytes so RAM can still be evicted safely later.
+            if not self._source_path:
+                ba = QtCore.QByteArray()
+                buf = QtCore.QBuffer(ba)
+                buf.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+                fmt = self.get_imgformat(image)
+                image.save(buf, fmt.upper(), quality=92)
+                buf.close()
+                self._source_bytes = bytes(ba.data())
+                self._img_format = fmt
+        else:
+            self.thumb_pixmap = QtGui.QPixmap.fromImage(image)
+        self._gray_cache = None
+        self.reset_crop()
+
+    @classmethod
+    def create_from_data(cls, **kwargs):
         data = kwargs.pop('data', {})
+        payload = kwargs.pop('payload', None)
+        item = kwargs.pop('item', None)
+        if item is None:
+            if payload is not None:
+                item = cls.from_lod_payload(
+                    payload, filename=data.get('filename'))
+            else:
+                item = cls(QtGui.QImage(), filename=data.get('filename'))
+
         item.filename = item.filename or data.get('filename')
         if 'crop' in data:
             item.crop = QtCore.QRectF(*data['crop'])
@@ -136,8 +223,71 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         return item
 
     def __str__(self):
-        size = self.pixmap().size()
-        return (f'Image "{self.filename}" {size.width()} x {size.height()}')
+        return (f'Image "{self.filename}" '
+                f'{self._orig_width} x {self._orig_height}')
+
+    @property
+    def orig_size(self) -> QtCore.QSize:
+        return QtCore.QSize(self._orig_width, self._orig_height)
+
+    @property
+    def max_orig_edge(self) -> int:
+        return max(self._orig_width, self._orig_height)
+
+    def get_source_spec(self) -> dict:
+        return {
+            'bytes': self._source_bytes,
+            'path': self._source_path,
+            'bee_source': self._bee_source,
+            'thumb_pixmap': self.thumb_pixmap,
+        }
+
+    def set_bee_source(self, bee_filepath: str, save_id: int):
+        self._bee_source = (bee_filepath, save_id)
+        # Once backed by a saved .bee file on disk, drop in-RAM compressed blob
+        # if there is no local file path so memory stays minimal.
+        if os.path.exists(bee_filepath):
+            self._source_bytes = None
+
+    def decode_source_qimage(self, max_edge: int | None = None) -> QtGui.QImage:
+        """Synchronously decode QImage at requested max_edge (or full-res)."""
+        if self.max_orig_edge <= LOD_THUMB_MAX and not self.thumb_pixmap.isNull():
+            return self.thumb_pixmap.toImage()
+
+        if self._source_bytes:
+            img, *_ = decode_from_bytes(self._source_bytes, max_edge=max_edge)
+            if not img.isNull():
+                return img
+
+        if self._source_path and os.path.exists(self._source_path):
+            img, *_ = decode_from_path(self._source_path, max_edge=max_edge)
+            if not img.isNull():
+                return img
+
+        if self._bee_source:
+            blob = fetch_sqlar_blob(self._bee_source[0], self._bee_source[1])
+            if blob:
+                img, *_ = decode_from_bytes(blob, max_edge=max_edge)
+                if not img.isNull():
+                    return img
+
+        return self.thumb_pixmap.toImage()
+
+    def pixmap(self) -> QtGui.QPixmap:
+        """Return full-resolution QPixmap (loaded on demand if evicted)."""
+        if self._orig_width <= 0 or self._orig_height <= 0:
+            return QtGui.QPixmap()
+        if self.max_orig_edge <= LOD_THUMB_MAX:
+            return self.thumb_pixmap
+        return LODCacheManager.instance().get_best_pixmap(
+            self, desired_tier=2, sync_if_missing=True)
+
+    def on_lod_ready(self):
+        self._gray_cache = None
+        self.update()
+
+    def on_lod_evicted(self):
+        self._gray_cache = None
 
     @property
     def crop(self):
@@ -148,6 +298,8 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         logger.debug(f'Setting crop for {self} to {value}')
         self.prepareGeometryChange()
         self._crop = value
+        if self.scene():
+            self.scene().invalidate_bounds_cache()
         self.update()
 
     @property
@@ -156,64 +308,63 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
 
     @grayscale.setter
     def grayscale(self, value):
-        logger.debug('Setting grayscale for {self} to {value}')
-        self._grayscale = value
-        if value is True:
-            # Using the grayscale image format to convert to grayscale
-            # loses an image's tranparency. So the straightworward
-            # following method gives us an ugly black replacement:
-            # img = img.convertToFormat(QtGui.QImage.Format.Format_Grayscale8)
-
-            # Instead, we will fill the background with the current
-            # canvas colour, so the issue is only visible if the image
-            # overlaps other images. The way we do it here only works
-            # as long as the canvas colour is itself grayscale,
-            # though.
-            img = QtGui.QImage(
-                self.pixmap().size(), QtGui.QImage.Format.Format_Grayscale8)
-            img.fill(QtGui.QColor(*COLORS['Scene:Canvas']))
-            painter = QtGui.QPainter(img)
-            painter.drawPixmap(0, 0, self.pixmap())
-            painter.end()
-            self._grayscale_pixmap = QtGui.QPixmap.fromImage(img)
-
-            # Alternative methods that have their own issues:
-            #
-            # 1. Use setAlphaChannel of the resulting grayscale
-            # image. How do we get the original alpha channel? Using
-            # the whole original image also takes color values into
-            # account, not just their alpha values.
-            #
-            # 2. QtWidgets.QGraphicsColorizeEffect() with black colour
-            # on the GraphicsItem. This applys to everything the paint
-            # method does, so the selection outline/handles will also
-            # be gray. setGraphicsEffect is only available on some
-            # widgets, so we can't apply it selectively.
-            #
-            # 3. Going through every pixel and doing it manually — bad
-            # performance.
-        else:
-            self._grayscale_pixmap = None
-
+        self._grayscale = bool(value)
+        if not self._grayscale:
+            self._gray_cache = None
         self.update()
 
-    def sample_color_at(self, pos):
-        ipos = self.mapFromScene(pos)
-        if self.grayscale:
-            pm = self._grayscale_pixmap
-        else:
-            pm = self.pixmap()
-        img = pm.toImage()
+    def _to_grayscale_pixmap(self, pm: QtGui.QPixmap) -> QtGui.QPixmap:
+        if pm.isNull():
+            return pm
+        key = pm.cacheKey()
+        if self._gray_cache is not None and self._gray_cache[0] == key:
+            return self._gray_cache[1]
 
-        color = img.pixelColor(int(ipos.x()), int(ipos.y()))
+        img = QtGui.QImage(
+            pm.size(), QtGui.QImage.Format.Format_Grayscale8)
+        img.fill(QtGui.QColor(*COLORS['Scene:Canvas']))
+        painter = QtGui.QPainter(img)
+        painter.drawPixmap(0, 0, pm)
+        painter.end()
+        gpm = QtGui.QPixmap.fromImage(img)
+        self._gray_cache = (key, gpm)
+        return gpm
+
+    def sample_color_at(self, pos):
+        if self._orig_width <= 0 or self._orig_height <= 0:
+            return None
+        ipos = self.mapFromScene(pos)
+        if not self.bounding_rect_unselected().contains(ipos):
+            return None
+
+        # Use highest currently-resident LOD pixmap without stalling mouse move
+        mgr = LODCacheManager.instance()
+        pm = (mgr.full_cache.get(id(self))
+              or mgr.mid_cache.get(id(self))
+              or self.thumb_pixmap)
+        if pm.isNull():
+            return None
+        if self.grayscale:
+            pm = self._to_grayscale_pixmap(pm)
+
+        sx = pm.width() / self._orig_width
+        sy = pm.height() / self._orig_height
+        px = min(pm.width() - 1, max(0, int(ipos.x() * sx)))
+        py = min(pm.height() - 1, max(0, int(ipos.y() * sy)))
+        # Copy only a 1x1 pixel rect instead of converting the entire 4K QPixmap!
+        one_px = pm.copy(px, py, 1, 1).toImage()
+        color = one_px.pixelColor(0, 0)
         if color.alpha():
             return color
+        return None
 
     def bounding_rect_unselected(self):
         if self.crop_mode:
-            return QtWidgets.QGraphicsPixmapItem.boundingRect(self)
-        else:
-            return self.crop
+            return QtCore.QRectF(0, 0, self._orig_width, self._orig_height)
+        return self.crop
+
+    def contains(self, point):
+        return self.boundingRect().contains(point)
 
     def get_extra_save_data(self):
         return {'filename': self.filename,
@@ -223,6 +374,12 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
                          self.crop.topLeft().y(),
                          self.crop.width(),
                          self.crop.height()]}
+
+    def get_thumb_save_bytes(self) -> bytes:
+        """Encoded Tier-0 thumbnail bytes for instant .bee project loading."""
+        if self.thumb_pixmap.isNull():
+            return b''
+        return encode_thumb_jpeg_or_png(self.thumb_pixmap.toImage())
 
     def get_filename_for_export(self, imgformat, save_id_default=None):
         save_id = self.save_id or save_id_default
@@ -240,7 +397,6 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         formt = self.settings.valueOrDefault('Items/image_storage_format')
 
         if formt == 'best':
-            # Images with alpha channel and small images are stored as png
             if (img.hasAlphaChannel()
                     or (img.height() < 500 and img.width() < 500)):
                 formt = 'png'
@@ -251,68 +407,109 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         return formt
 
     def pixmap_to_bytes(self, apply_grayscale=False, apply_crop=False):
-        """Convert the pixmap data to PNG bytestring."""
+        """Convert image data to compressed PNG/JPG bytestring (zero-reencode fast path)."""
+        if not apply_grayscale and not apply_crop:
+            pref_fmt = self.settings.valueOrDefault('Items/image_storage_format')
+
+            # Fast path 1: Already have encoded bytes in memory
+            if self._source_bytes and self._img_format in ('jpg', 'png'):
+                if pref_fmt in ('best', self._img_format):
+                    return (self._source_bytes, self._img_format)
+
+            # Fast path 2: Backed by unmodified local JPG/PNG file (no EXIF rotation needed)
+            if (self._source_path
+                    and self._exif_trans == 0
+                    and self._img_format in ('jpg', 'png')
+                    and os.path.exists(self._source_path)):
+                if pref_fmt == self._img_format or (
+                        pref_fmt == 'best' and self._img_format == 'jpg'):
+                    try:
+                        raw = pathlib.Path(self._source_path).read_bytes()
+                        return (raw, self._img_format)
+                    except OSError:
+                        pass
+
+            # Fast path 3: Backed by existing .bee sqlar archive
+            if self._bee_source and pref_fmt == 'best':
+                blob = fetch_sqlar_blob(self._bee_source[0], self._bee_source[1])
+                if blob:
+                    fmt = self._img_format if self._img_format in ('jpg', 'png') else (
+                        'png' if blob[:8] == b'\x89PNG\r\n\x1a\n' else 'jpg')
+                    return (blob, fmt)
+
+        # General path: decode lossless source and encode
+        img = self.decode_source_qimage(max_edge=None)
+        if apply_grayscale and self.grayscale:
+            g_img = QtGui.QImage(
+                img.size(), QtGui.QImage.Format.Format_Grayscale8)
+            g_img.fill(QtGui.QColor(*COLORS['Scene:Canvas']))
+            p = QtGui.QPainter(g_img)
+            p.drawImage(0, 0, img)
+            p.end()
+            img = g_img
+
+        if apply_crop:
+            img = img.copy(self.crop.toRect())
+
         barray = QtCore.QByteArray()
         buffer = QtCore.QBuffer(barray)
         buffer.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
-        if apply_grayscale and self.grayscale:
-            pm = self._grayscale_pixmap
-        else:
-            pm = self.pixmap()
-
-        if apply_crop:
-            pm = pm.copy(self.crop.toRect())
-
-        img = pm.toImage()
         imgformat = self.get_imgformat(img)
         img.save(buffer, imgformat.upper(), quality=90)
-        return (barray.data(), imgformat)
+        buffer.close()
+        return (bytes(barray.data()), imgformat)
 
     def setPixmap(self, pixmap):
-        super().setPixmap(pixmap)
-        self.reset_crop()
+        LODCacheManager.instance().evict_item(self)
+        if pixmap is None or pixmap.isNull():
+            self._orig_width = 0
+            self._orig_height = 0
+            self.thumb_pixmap = QtGui.QPixmap()
+            self._crop = QtCore.QRectF(0, 0, 0, 0)
+            return
+        self._init_from_qimage(pixmap.toImage())
 
-    def pixmap_from_bytes(self, data):
-        """Set image pimap from a bytestring."""
-        pixmap = QtGui.QPixmap()
-        pixmap.loadFromData(data)
-        self.setPixmap(pixmap)
+    def pixmap_from_bytes(self, data: bytes, bee_source: tuple[str, int] | None = None):
+        """Initialize LOD-backed image from compressed PNG/JPG bytes."""
+        LODCacheManager.instance().evict_item(self)
+        payload = build_payload_from_bytes(
+            data, bee_source=bee_source, keep_bytes=(bee_source is None))
+        if payload is not None:
+            self._apply_lod_payload(payload)
+        else:
+            self._orig_width = 0
+            self._orig_height = 0
+            self.thumb_pixmap = QtGui.QPixmap()
+            self._crop = QtCore.QRectF(0, 0, 0, 0)
 
     def create_copy(self):
         item = BeePixmapItem(QtGui.QImage(), self.filename)
-        item.setPixmap(self.pixmap())
+        item._orig_width = self._orig_width
+        item._orig_height = self._orig_height
+        item._exif_trans = self._exif_trans
+        item._img_format = self._img_format
+        item._source_path = self._source_path
+        item._source_bytes = self._source_bytes
+        item._bee_source = self._bee_source
+        item.thumb_pixmap = QtGui.QPixmap(self.thumb_pixmap)
         item.setPos(self.pos())
         item.setZValue(self.zValue())
         item.setScale(self.scale())
         item.setRotation(self.rotation())
-        item.setOpacity(self.opacity())
-        item.grayscale = self.grayscale
         if self.flip() == -1:
             item.do_flip()
-        item.crop = self.crop
+        item.crop = QtCore.QRectF(self.crop)
+        item.setOpacity(self.opacity())
+        item.grayscale = self.grayscale
         return item
 
     @cached_property
     def color_gamut(self):
         logger.debug(f'Calculating color gamut for {self}')
         gamut = defaultdict(int)
-        img = self.pixmap().toImage()
-        # Don't evaluate every pixel for larger images:
+        # Sampling from Tier-1 / Tier-0 image is already <= 1280px and accurate!
+        img = self.decode_source_qimage(max_edge=1000)
         step = max(1, int(max(img.width(), img.height()) / 1000))
-        logger.debug(f'Considering every {step}. row/column')
-
-        # Not actually faster than solution below :(
-        # ptr = img.bits()
-        # size = img.sizeInBytes()
-        # pixelsize = int(img.sizeInBytes() / img.width() / img.height())
-        # ptr.setsize(size)
-        # for pixel in batched(ptr, n=pixelsize):
-        #     r, g, b, alpha = tuple(map(ord, pixel))
-        #     if 5 < alpha and 5 < r < 250 and 5 < g < 250 and 5 < b < 250:
-        #         # Only consider pixels that aren't close to
-        #         # transparent, white or black
-        #         rgb = QtGui.QColor(r, g, b)
-        #         gamut[rgb.hue(), rgb.saturation()] += 1
 
         for i in range(0, img.width(), step):
             for j in range(0, img.height(), step):
@@ -320,8 +517,6 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
                 rgbtuple = (rgb.red(), rgb.blue(), rgb.green())
                 if (5 < rgb.alpha()
                         and min(rgbtuple) < 250 and max(rgbtuple) > 5):
-                    # Only consider pixels that aren't close to
-                    # transparent, white or black
                     gamut[rgb.hue(), rgb.saturation()] += 1
 
         logger.debug(f'Got {len(gamut)} color gamut values')
@@ -332,7 +527,7 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
 
     def reset_crop(self):
         self.crop = QtCore.QRectF(
-            0, 0, self.pixmap().size().width(), self.pixmap().size().height())
+            0, 0, self._orig_width, self._orig_height)
 
     @property
     def crop_handle_size(self):
@@ -446,19 +641,53 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         painter.setPen(pen)
         painter.drawRect(rect)
 
+    def _select_render_pixmap(self, painter, widget) -> QtGui.QPixmap:
+        if self._orig_width <= 0 or self._orig_height <= 0:
+            return self.thumb_pixmap
+
+        ct = painter.combinedTransform()
+        # Rotation-invariant Euclidean device scale
+        item_to_device = math.hypot(ct.m11(), ct.m12())
+        screen_max_edge = self.max_orig_edge * item_to_device
+
+        if screen_max_edge <= LOD_THUMB_MAX:
+            tier = 0
+        elif screen_max_edge <= LOD_MID_MAX:
+            tier = 1
+        else:
+            tier = 2
+
+        is_offscreen_export = (widget is None)
+        pm = LODCacheManager.instance().get_best_pixmap(
+            self, desired_tier=tier, sync_if_missing=is_offscreen_export)
+
+        if self.grayscale:
+            pm = self._to_grayscale_pixmap(pm)
+        return pm
+
     def paint(self, painter, option, widget):
-        if abs(painter.combinedTransform().m11()) < 2:
-            # We want image smoothing, but only for images where we
-            # are not zoomed in a lot. This is to ensure that for
-            # example icons and pixel sprites can be viewed correctly.
+        if self._orig_width <= 0 or self._orig_height <= 0:
+            return
+
+        ct = painter.combinedTransform()
+        item_to_device = math.hypot(ct.m11(), ct.m12())
+        screen_max_edge = self.max_orig_edge * item_to_device
+        if item_to_device < 2.0:
             painter.setRenderHint(painter.RenderHint.SmoothPixmapTransform)
+
+        pm = self._select_render_pixmap(painter, widget)
+        if pm.isNull():
+            return
 
         if self.crop_mode:
             self.paint_debug(painter, option, widget)
 
-            # Darken image outside of cropped area
-            painter.drawPixmap(0, 0, self.pixmap())
-            path = QtWidgets.QGraphicsPixmapItem.shape(self)
+            full_target = QtCore.QRectF(0, 0, self._orig_width, self._orig_height)
+            full_src = QtCore.QRectF(0, 0, pm.width(), pm.height())
+            painter.drawPixmap(full_target, pm, full_src)
+
+            path = QtGui.QPainterPath()
+            path.addRect(full_target)
             path.addRect(self.crop_temp)
             color = QtGui.QColor(0, 0, 0)
             color.setAlpha(100)
@@ -471,8 +700,26 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
                 self.draw_crop_rect(painter, handle())
             self.draw_crop_rect(painter, self.crop_temp)
         else:
-            pm = self._grayscale_pixmap if self.grayscale else self.pixmap()
-            painter.drawPixmap(self.crop, pm, self.crop)
+            if widget is not None and screen_max_edge > 150 and self.opacity() > 0.85:
+                # Subtle LOD-gated card shadow (skipped automatically when zoomed out on 1000+ images)
+                inv = 1.0 / max(0.05, item_to_device)
+                sh_off = min(14.0, 4.0 * inv)
+                sh_pad = min(8.0, 1.5 * inv)
+                sh_rect = self.crop.adjusted(-sh_pad, -sh_pad + sh_off, sh_pad, sh_pad + sh_off)
+                painter.fillRect(sh_rect, QtGui.QColor(0, 0, 0, 28))
+
+            if pm.width() == self._orig_width and pm.height() == self._orig_height:
+                src_rect = self.crop
+            else:
+                sx = pm.width() / self._orig_width
+                sy = pm.height() / self._orig_height
+                src_rect = QtCore.QRectF(
+                    self.crop.x() * sx,
+                    self.crop.y() * sy,
+                    self.crop.width() * sx,
+                    self.crop.height() * sy,
+                )
+            painter.drawPixmap(self.crop, pm, src_rect)
             self.paint_selectable(painter, option, widget)
 
     def enter_crop_mode(self):
@@ -528,55 +775,47 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
 
         event.accept()
         for handle in self.crop_handles():
-            # Click into a handle?
             if handle().contains(event.pos()):
                 self.crop_mode_event_start = event.pos()
                 self.crop_mode_move = handle
                 return
         for edge in self.crop_edges():
-            # Click into an edge handle?
             if edge().contains(event.pos()):
                 self.crop_mode_event_start = event.pos()
                 self.crop_mode_move = edge
                 return
-        # Click not in handle, end cropping mode:
         self.exit_crop_mode(
             confirm=self.crop_temp.contains(event.pos()))
 
     def ensure_point_within_crop_bounds(self, point, handle):
         """Returns the point, or the nearest point within the pixmap."""
+        w = self._orig_width
+        h = self._orig_height
 
         if handle == self.crop_handle_topleft:
             topleft = QtCore.QPointF(0, 0)
             bottomright = self.crop_temp.bottomRight()
         if handle == self.crop_handle_bottomleft:
             topleft = QtCore.QPointF(0, self.crop_temp.top())
-            bottomright = QtCore.QPointF(
-                self.crop_temp.right(), self.pixmap().size().height())
+            bottomright = QtCore.QPointF(self.crop_temp.right(), h)
         if handle == self.crop_handle_bottomright:
             topleft = self.crop_temp.topLeft()
-            bottomright = QtCore.QPointF(
-                self.pixmap().size().width(), self.pixmap().size().height())
+            bottomright = QtCore.QPointF(w, h)
         if handle == self.crop_handle_topright:
             topleft = QtCore.QPointF(self.crop_temp.left(), 0)
-            bottomright = QtCore.QPointF(
-                self.pixmap().size().width(), self.crop_temp.bottom())
+            bottomright = QtCore.QPointF(w, self.crop_temp.bottom())
         if handle == self.crop_edge_top:
             topleft = QtCore.QPointF(0, 0)
-            bottomright = QtCore.QPointF(
-                self.pixmap().size().width(), self.crop_temp.bottom())
+            bottomright = QtCore.QPointF(w, self.crop_temp.bottom())
         if handle == self.crop_edge_bottom:
             topleft = QtCore.QPointF(0, self.crop_temp.top())
-            bottomright = QtCore.QPointF(
-                self.pixmap().size().width(), self.pixmap().size().height())
+            bottomright = QtCore.QPointF(w, h)
         if handle == self.crop_edge_left:
             topleft = QtCore.QPointF(0, 0)
-            bottomright = QtCore.QPointF(
-                self.crop_temp.right(), self.pixmap().size().height())
+            bottomright = QtCore.QPointF(self.crop_temp.right(), h)
         if handle == self.crop_edge_right:
             topleft = QtCore.QPointF(self.crop_temp.left(), 0)
-            bottomright = QtCore.QPointF(
-                self.pixmap().size().width(), self.pixmap().size().height())
+            bottomright = QtCore.QPointF(w, h)
 
         point.setX(min(bottomright.x(), max(topleft.x(), point.x())))
         point.setY(min(bottomright.y(), max(topleft.y(), point.y())))
@@ -697,7 +936,6 @@ class BeeTextItem(BeeItemMixin, QtWidgets.QGraphicsTextItem):
     def exit_edit_mode(self, commit=True):
         logger.debug(f'Exiting edit mode on {self}')
         self.edit_mode = False
-        # reset selection:
         self.setTextCursor(QtGui.QTextCursor(self.document()))
         self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         self.scene().edit_item = None
@@ -735,11 +973,6 @@ class BeeTextItem(BeeItemMixin, QtWidgets.QGraphicsTextItem):
 class BeeErrorItem(BeeItemMixin, QtWidgets.QGraphicsTextItem):
     """Class for displaying error messages when an item can't be loaded
     from a bee file.
-
-    This item will be displayed instead of the original item. It won't
-    save to bee files. The original item will be preserved in the bee
-    file, unless this item gets deleted by the user, or a new bee file
-    is saved.
     """
 
     TYPE = 'error'
@@ -793,13 +1026,9 @@ class BeeErrorItem(BeeItemMixin, QtWidgets.QGraphicsTextItem):
         return item
 
     def flip(self, *args, **kwargs):
-        """Returns the flip value (1 or -1)"""
-        # Never display error messages flipped
         return 1
 
     def do_flip(self, *args, **kwargs):
-        """Flips the item."""
-        # Never flip error messages
         pass
 
     def copy_to_clipboard(self, clipboard):

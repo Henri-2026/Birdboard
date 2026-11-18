@@ -31,7 +31,7 @@ from beeref import utils
 
 commandline_args = CommandlineArgs()
 logger = logging.getLogger(__name__)
-SELECT_COLOR = QtGui.QColor(*COLORS['Scene:Selection'])
+SELECT_COLOR = QtGui.QColor(58, 130, 247)  # Penart #3A82F7
 
 
 def with_anchor(func):
