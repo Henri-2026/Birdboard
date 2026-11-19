@@ -135,3 +135,7 @@ dmypy.json
 Gemfile.lock
 _site
 .bundle
+
+
+# Local upstream reference repositories (kept locally for R&D, not pushed)
+reporef/
