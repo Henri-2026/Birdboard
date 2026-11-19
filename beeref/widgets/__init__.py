@@ -20,7 +20,7 @@ from PyQt6 import QtCore, QtWidgets, QtGui
 from PyQt6.QtCore import Qt
 
 from beeref import constants, commands
-from beeref.config import logfile_name
+from beeref.config import BeeSettings, logfile_name
 from beeref.widgets import (  # noqa: F401
     controls,
     settings,
@@ -242,6 +242,139 @@ class ChangeOpacityDialog(QtWidgets.QDialog):
 
     def reject(self):
         self.command.undo()
+        return super().reject()
+
+
+class ArrangeGapDialog(QtWidgets.QDialog):
+    """Live-preview spacing control for Arrange -> Optimal & batch arrangements."""
+
+    def __init__(self, parent, scene, undo_stack):
+        super().__init__(parent)
+        self.scene = scene
+        self.undo_stack = undo_stack
+        self.settings = BeeSettings()
+        self.orig_gap = int(self.settings.valueOrDefault('Items/arrange_gap'))
+        self.current_gap = self.orig_gap
+
+        self.items = self.scene.selectedItems(user_only=True)
+        self.orig_positions = [QtCore.QPointF(i.pos()) for i in self.items]
+        self._last_ordered = list(self.items)
+        self._last_target_positions = None
+        self._syncing = False
+
+        self.setWindowTitle('Arrange Gap (Spacing)')
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setMinimumWidth(360)
+
+        layout = QtWidgets.QVBoxLayout()
+        self.setLayout(layout)
+
+        desc = QtWidgets.QLabel(
+            'Spacing (px) between images for Optimal & Line/Square arrangement:'
+        )
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        row = QtWidgets.QHBoxLayout()
+        self.slider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, 200)
+        self.slider.setValue(self.orig_gap)
+        self.spin = QtWidgets.QSpinBox()
+        self.spin.setRange(0, 200)
+        self.spin.setSuffix(' px')
+        self.spin.setValue(self.orig_gap)
+
+        row.addWidget(self.slider, stretch=1)
+        row.addWidget(self.spin)
+        layout.addLayout(row)
+
+        # Quick preset chips (0, 4, 8, 12, 16, 24, 32 px)
+        preset_row = QtWidgets.QHBoxLayout()
+        for preset in (0, 4, 8, 12, 16, 24, 32):
+            btn = QtWidgets.QPushButton(f'{preset}')
+            btn.setFixedWidth(38)
+            btn.setAutoDefault(False)
+            btn.clicked.connect(lambda _checked=False, v=preset: self._set_gap(v))
+            preset_row.addWidget(btn)
+        preset_row.addStretch(1)
+        layout.addLayout(preset_row)
+
+        self._preview_timer = QtCore.QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(25)
+        self._preview_timer.timeout.connect(self._apply_live_preview)
+
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        self.spin.valueChanged.connect(self._on_spin_changed)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        if len(self.items) >= 2:
+            self._apply_live_preview()
+        self.show()
+
+    def _set_gap(self, val: int):
+        self.spin.setValue(val)
+
+    def _on_slider_changed(self, val: int):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.spin.setValue(val)
+        self._syncing = False
+        self.current_gap = val
+        self._preview_timer.start()
+
+    def _on_spin_changed(self, val: int):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.slider.setValue(val)
+        self._syncing = False
+        self.current_gap = val
+        self._preview_timer.start()
+
+    def _restore_orig_positions(self):
+        if len(self.items) < 2:
+            return
+        with self.scene.batch_update():
+            for item, pos in zip(self.items, self.orig_positions):
+                item.setPos(pos)
+
+    def _apply_live_preview(self):
+        if len(self.items) < 2:
+            return
+        # Restore baseline first so center stays stable while scrubbing slider
+        self._restore_orig_positions()
+        ordered, qpositions = self.scene.compute_optimal_positions(
+            self.items, gap=self.current_gap)
+        self._last_ordered = ordered
+        self._last_target_positions = qpositions
+        with self.scene.batch_update():
+            for item, pos in zip(ordered, qpositions):
+                orig_tl = item.mapToScene(QtCore.QPointF(0, 0))
+                rect_tl = item.sceneTransform().mapRect(
+                    item.bounding_rect_unselected()).topLeft()
+                item.setPos(pos + orig_tl - rect_tl)
+
+    def accept(self):
+        self.settings.setValue('Items/arrange_gap', self.current_gap)
+        if len(self.items) >= 2 and self._last_target_positions is not None:
+            # Restore baseline momentarily so ArrangeItems records true Undo old_positions
+            self._restore_orig_positions()
+            self.undo_stack.push(
+                commands.ArrangeItems(
+                    self.scene, self._last_ordered, self._last_target_positions))
+        return super().accept()
+
+    def reject(self):
+        self.settings.setValue('Items/arrange_gap', self.orig_gap)
+        self._restore_orig_positions()
         return super().reject()
 
 

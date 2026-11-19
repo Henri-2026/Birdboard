@@ -139,3 +139,7 @@ _site
 
 # Local upstream reference repositories (kept locally for R&D, not pushed)
 reporef/
+
+# Unpacked duplicate source mirror inside release folder (zip & notes remain tracked)
+release/*/source/
+release/*/docs/

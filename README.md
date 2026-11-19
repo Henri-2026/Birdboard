@@ -43,10 +43,13 @@ BIRDBOARD/
 ├── pyproject.toml            # Khai báo cấu hình gói Python & thư viện phụ thuộc
 ├── beeref/                   # Mã nguồn chính của ứng dụng Birdboard
 ├── docs/                     # Thư mục tài liệu kỹ thuật & thiết kế chi tiết
+│   ├── ARRANGE_OPTIMAL_AND_GAP_GUIDE.md   # Thuật toán xếp khối vuông Optimal & khoảng cách Gap
+│   ├── ZERO_LAG_AND_ANTI_ALIASING_GUIDE.md # Kỹ thuật xem >1.000 hình không lag, không răng cưa
 │   ├── ARCHITECTURE.md       # Giải phẫu kiến trúc GPU, LOD Cache, Scene & SQLite
 │   ├── UI_DESIGN_SYSTEM.md   # Hệ màu, vật lý chuyển động Penart & thiết kế Bảng Đồng Hồ
 │   ├── REFERENCE_ANALYSIS.md # Phân tích đối chiếu các kho mã nguồn mẫu
 │   └── CONTROLS_AND_SHORTCUTS.md # Hướng dẫn phím tắt & thao tác chuột
+├── release/                  # Gói phát hành chính thức (Source code + Docs đóng gói)
 ├── reporef/                  # Các kho mã nguồn mở tham chiếu lưu tại local (gitignore)
 │   ├── beeref/               # Nguồn gốc rbreu/beeref
 │   ├── PureRef-format/       # Đặc tả đọc/ghi định dạng .pur của PureRef
@@ -74,9 +77,11 @@ python -m venv .venv
 
 ## 5. Tài Liệu Chi Tiết
 
+- **[Thuật toán Xếp Khối Vuông (`Arrange -> Optimal`) & Khoảng Cách (`Arrange Gap`)](docs/ARRANGE_OPTIMAL_AND_GAP_GUIDE.md)**
+- **[Kỹ thuật Hiển thị >1.000 Hình Không Lag & Không Răng Cưa](docs/ZERO_LAG_AND_ANTI_ALIASING_GUIDE.md)**
 - [Hướng dẫn dành cho AI Agent (`AGENT.md`)](AGENT.md)
 - [Nhật ký tiến độ & Lộ trình (`PROGRESS.md`)](PROGRESS.md)
-- [Kiến trúc hệ thống & Chống lag (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)
+- [Kiến trúc hệ thống tổng thể (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)
 - [Hệ thống thiết kế UI & Chuyển động (`docs/UI_DESIGN_SYSTEM.md`)](docs/UI_DESIGN_SYSTEM.md)
 - [Phân tích các Repo tham chiếu (`docs/REFERENCE_ANALYSIS.md`)](docs/REFERENCE_ANALYSIS.md)
 - [Bảng phím tắt & Thao tác chuột (`docs/CONTROLS_AND_SHORTCUTS.md`)](docs/CONTROLS_AND_SHORTCUTS.md)

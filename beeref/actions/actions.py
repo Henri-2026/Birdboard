@@ -267,6 +267,12 @@ actions = ActionList([
         group='active_when_selection',
     ),
     Action(
+        id='arrange_gap',
+        text='Arrange &Gap...',
+        shortcuts=['Shift+G'],
+        callback='on_action_arrange_gap',
+    ),
+    Action(
         id='change_opacity',
         text='Change &Opacity...',
         callback='on_action_change_opacity',

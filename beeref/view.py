@@ -424,6 +424,10 @@ class BeeGraphicsView(MainControlsMixin,
     def on_action_arrange_square(self):
         self.scene.arrange_square()
 
+    def on_action_arrange_gap(self):
+        self.cancel_active_modes()
+        widgets.ArrangeGapDialog(self, self.scene, self.undo_stack)
+
     def on_action_change_opacity(self):
         images = [
             item for item in self.scene.selectedItems(user_only=True)

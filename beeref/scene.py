@@ -291,27 +291,30 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
             commands.ArrangeItems(
                 self, [r['item'] for r in rects], positions))
 
-    def arrange_optimal(self):
-        self.cancel_active_modes()
-        items = self.selectedItems(user_only=True)
+    def compute_optimal_positions(self, items, gap: int | None = None):
+        """Compute (ordered_items, qpositions) for Optimal square/rect packing."""
         if len(items) < 2:
-            return
+            return list(items), [i.pos() for i in items]
 
-        gap = self.settings.valueOrDefault('Items/arrange_gap')
-        sizes = []
-        for item in items:
-            rect = self._item_scene_rect_fast(item)
-            sizes.append((
-                max(1, round(rect.width() + gap)),
-                max(1, round(rect.height() + gap)),
-            ))
+        if gap is None:
+            gap = self.settings.valueOrDefault('Items/arrange_gap')
 
         if len(items) <= 300:
+            ordered = list(items)
+            sizes = []
+            for item in ordered:
+                rect = self._item_scene_rect_fast(item)
+                sizes.append((
+                    max(1, round(rect.width() + gap)),
+                    max(1, round(rect.height() + gap)),
+                ))
             min_area = sum(s[0] * s[1] for s in sizes)
             max_single_w = max(s[0] for s in sizes)
             max_single_h = max(s[1] for s in sizes)
-            width = max(max_single_w, max_single_h, math.ceil(math.sqrt(min_area) * 1.06))
-
+            width = max(
+                max_single_w, max_single_h,
+                math.ceil(math.sqrt(min_area) * 1.06),
+            )
             positions = None
             while not positions:
                 try:
@@ -321,10 +324,9 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
                     width = math.ceil(width * 1.2)
             bounds = rpack.bbox_size(sizes, positions)
         else:
-            # Fast O(N log K) masonry packing for 300 - 10,000+ images
-            items = sort_by_filename(items)
+            ordered = sort_by_filename(items)
             sizes = []
-            for item in items:
+            for item in ordered:
                 rect = self._item_scene_rect_fast(item)
                 sizes.append((
                     max(1, round(rect.width() + gap)),
@@ -338,8 +340,15 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
         center = self.get_selection_center()
         diff = center - QtCore.QPointF(bounds[0] / 2, bounds[1] / 2)
         qpositions = [QtCore.QPointF(p[0], p[1]) + diff for p in positions]
+        return ordered, qpositions
 
-        self.undo_stack.push(commands.ArrangeItems(self, items, qpositions))
+    def arrange_optimal(self):
+        self.cancel_active_modes()
+        items = self.selectedItems(user_only=True)
+        if len(items) < 2:
+            return
+        ordered, qpositions = self.compute_optimal_positions(items)
+        self.undo_stack.push(commands.ArrangeItems(self, ordered, qpositions))
 
     def arrange_square(self):
         self.cancel_active_modes()

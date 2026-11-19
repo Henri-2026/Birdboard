@@ -103,6 +103,8 @@ menu_structure = [
             'arrange_horizontal',
             'arrange_vertical',
             'arrange_square',
+            MENU_SEPARATOR,
+            'arrange_gap',
         ],
     },
     {

@@ -61,10 +61,13 @@ D:\.Linh app\BIRDBOARD\
 ├── Birdboard.spec              # Cấu hình đóng gói file Birdboard.exe độc lập (PyInstaller)
 ├── pyproject.toml              # Khai báo metadata gói Birdboard & dependencies
 ├── docs/                       # Tài liệu kỹ thuật chuyên sâu
+│   ├── ARRANGE_OPTIMAL_AND_GAP_GUIDE.md    # Thuật toán xếp khối vuông Optimal & Arrange Gap
+│   ├── ZERO_LAG_AND_ANTI_ALIASING_GUIDE.md # Giải phẫu chống lag & khử răng cưa >1.000 hình
 │   ├── ARCHITECTURE.md         # Kiến trúc Engine GPU, 3-Tier LOD, Scene O(1) & SQLite I/O
 │   ├── UI_DESIGN_SYSTEM.md     # Quy chuẩn màu sắc, Penart Dropdown, DWM & thiết kế Bảng Đồng Hồ
 │   ├── REFERENCE_ANALYSIS.md   # Phân tích đối chiếu các repo mẫu trong reporef/
 │   └── CONTROLS_AND_SHORTCUTS.md # Bảng tra cứu thao tác chuột & phím tắt
+├── release/                    # Thư mục phát hành bản đóng gói Source Code + Docs
 ├── reporef/                    # Kho mã nguồn tham chiếu tại máy local (đã gitignore)
 │   ├── README.md               # Chỉ mục các repo tham chiếu
 │   ├── beeref/                 # Bản gốc rbreu/beeref (đối chiếu diff & core Qt)

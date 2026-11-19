@@ -44,7 +44,8 @@ Tất cả phím tắt và thao tác chuột trong **Birdboard** đều có th�
 
 | Thao tác | Phím tắt mặc định |
 | :--- | :--- |
-| **Xếp khít diện tích tối ưu (`Arrange Optimal`)** | `Shift + O` |
+| **Xếp khít diện tích tối ưu thành khối vuông (`Arrange Optimal`)** | `Shift + O` |
+| **Chỉnh khoảng cách khe hở giữa các hình trực quan (`Arrange Gap...`)** | `Shift + G` *(hoặc `Arrange -> Arrange Gap...`)* |
 | **Đưa các ảnh về cùng Chiều cao (`Normalize Height`)** | `Shift + H` |
 | **Đưa các ảnh về cùng Chiều rộng (`Normalize Width`)** | `Shift + W` |
 | **Đưa các ảnh về cùng Diện tích (`Normalize Size`)** | `Shift + S` |
