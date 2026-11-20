@@ -19,6 +19,7 @@ import heapq
 import logging
 import math
 from queue import Empty, Queue
+import time
 
 from PyQt6 import QtCore, QtWidgets, QtGui
 from PyQt6.QtCore import Qt
@@ -27,12 +28,15 @@ import rpack
 
 from beeref import commands
 from beeref.config import BeeSettings
+from beeref.deskboard_motion import Spring
 from beeref.items import item_registry, BeeErrorItem, sort_by_filename
 from beeref.lod_cache import LODCacheManager
 from beeref.selection import MultiSelectItem, RubberbandItem
+from beeref.stack_manager import StackManager, new_stack_id
 
 
 logger = logging.getLogger(__name__)
+_SPRING_HOVER_LIFT = Spring(420.0, 26.0)
 
 
 def _pack_large_masonry(sizes: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -109,6 +113,22 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
         self._cached_all_bounds: QtCore.QRectF | None = None
         self._cached_sel_bounds: QtCore.QRectF | None = None
         self._pending_insert_items: list = []
+        self._expanding_stack_sel = False
+
+        # Stack Group gesture tracking
+        self._pressed_collapsed_sid: str | None = None
+        self._collapsed_dragged = False
+        self._spread_press_item = None
+        self._spread_press_orig_pos = QtCore.QPointF()
+        self._spread_dragged = False
+        self.stack_manager = StackManager(self)
+
+        # Zero-overhead shared hover micro-bounce animator
+        self._hovered_targets: set = set()
+        self._hover_anim_items: set = set()
+        self._hover_timer = QtCore.QTimer(self)
+        self._hover_timer.setInterval(8)  # 120 FPS
+        self._hover_timer.timeout.connect(self._on_hover_tick)
 
         self.selectionChanged.connect(self.on_selection_change)
         self.changed.connect(self.on_change)
@@ -152,7 +172,13 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
 
     def clear(self):
         self._clear_ongoing = True
+        if hasattr(self, '_hover_timer'):
+            self._hover_timer.stop()
+            self._hovered_targets.clear()
+            self._hover_anim_items.clear()
         LODCacheManager.instance().clear_all()
+        if hasattr(self, 'stack_manager'):
+            self.stack_manager.clear()
         super().clear()
         self.internal_clipboard = []
         self._pending_insert_items = []
@@ -160,6 +186,80 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
         self.multi_select_item = MultiSelectItem()
         self.invalidate_bounds_cache()
         self._clear_ongoing = False
+
+    def on_item_hover_changed(self, item, entered: bool):
+        if self._clear_ongoing:
+            return
+        if entered:
+            if self.active_mode is not None:
+                return
+            view = self.views()[0] if self.views() else None
+            if view is not None and getattr(view, 'active_mode', None) is not None:
+                return
+        elif not self._hovered_targets and not self._hover_anim_items:
+            return
+
+        new_targets: set = set()
+        if entered:
+            sid = getattr(item, 'stack_id', None)
+            if sid and self.stack_manager.active_spread_stack_id != sid:
+                new_targets = set(self.stack_manager.visible_pile_members_fast(sid))
+            else:
+                new_targets = {item}
+        else:
+            # Check if another card in the same collapsed stack is still hovered
+            sid = getattr(item, 'stack_id', None)
+            if sid and self.stack_manager.active_spread_stack_id != sid:
+                vis_m = self.stack_manager.visible_pile_members_fast(sid)
+                if any(getattr(m, '_hover_inside', False) for m in vis_m):
+                    new_targets = set(vis_m)
+
+        now = time.perf_counter()
+        changed = (new_targets ^ self._hovered_targets)
+        for it in changed:
+            target = 1.0 if (it in new_targets) else 0.0
+            if abs(getattr(it, '_hover_target', 0.0) - target) > 1e-4:
+                it._hover_target = target
+                it._hover_from = getattr(it, '_hover_lift', 0.0)
+                it._hover_t0 = now
+                self._hover_anim_items.add(it)
+
+        self._hovered_targets = new_targets
+        if self._hover_anim_items and not self._hover_timer.isActive():
+            self._hover_timer.start()
+
+    def _on_hover_tick(self):
+        if not self._hover_anim_items:
+            self._hover_timer.stop()
+            return
+        now = time.perf_counter()
+        done = []
+        for it in list(self._hover_anim_items):
+            if it.scene() is not self or not it.isVisible():
+                it._hover_lift = 0.0
+                it._hover_target = 0.0
+                done.append(it)
+                continue
+            dt = now - getattr(it, '_hover_t0', now)
+            target = getattr(it, '_hover_target', 0.0)
+            start = getattr(it, '_hover_from', 0.0)
+            if target > 0.5:
+                dur = 0.28
+                prog = _SPRING_HOVER_LIFT.value(dt) if dt < dur else 1.0
+            else:
+                dur = 0.16
+                u = min(1.0, dt / dur)
+                prog = 1.0 - (1.0 - u) * (1.0 - u)
+            it._hover_lift = start + (target - start) * prog
+            it.update()
+            if dt >= dur:
+                it._hover_lift = target
+                done.append(it)
+
+        for it in done:
+            self._hover_anim_items.discard(it)
+        if not self._hover_anim_items:
+            self._hover_timer.stop()
 
     def addItem(self, item):
         self.invalidate_bounds_cache()
@@ -214,6 +314,11 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
     def _item_scene_rect_fast(self, item) -> QtCore.QRectF:
         return item.sceneTransform().mapRect(item.bounding_rect_unselected())
 
+    def _arrange_unit_scene_rect(self, item) -> QtCore.QRectF:
+        if hasattr(item, '_is_collapsed_stack_cover') and item._is_collapsed_stack_cover():
+            return item.sceneTransform().mapRect(item._collapsed_pile_local_rect())
+        return self._item_scene_rect_fast(item)
+
     def normalize_width_or_height(self, mode):
         self.cancel_active_modes()
         items = self.selectedItems(user_only=True)
@@ -253,10 +358,29 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
         }
         MAPPING[default]()
 
+    def _collapse_stack_units_for_arrange(self, items: list) -> list:
+        """Represent each selected Collapsed Stack by its single Cover item."""
+        if self.stack_manager.active_spread_stack_id is not None:
+            return list(items)
+        out = []
+        seen_sids = set()
+        for it in items:
+            sid = getattr(it, 'stack_id', None)
+            if sid:
+                if sid not in seen_sids:
+                    seen_sids.add(sid)
+                    members = self.stack_manager.members_of(sid)
+                    out.append(members[0] if members else it)
+            else:
+                out.append(it)
+        return out
+
     def arrange(self, vertical=False):
         """Arrange items in a line (horizontally or vertically)."""
         self.cancel_active_modes()
-        items = sort_by_filename(self.selectedItems(user_only=True))
+        raw_items = self._collapse_stack_units_for_arrange(
+            self.selectedItems(user_only=True))
+        items = sort_by_filename(raw_items)
         if len(items) < 2:
             return
 
@@ -291,60 +415,105 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
             commands.ArrangeItems(
                 self, [r['item'] for r in rects], positions))
 
+    def pack_optimal_sizes(
+        self,
+        sizes: list[tuple[int, int]],
+    ) -> tuple[list[tuple[int, int]], tuple[int, int]]:
+        """Pack (w, h) rectangles into a compact Optimal block (zero orphan rows)."""
+        n = len(sizes)
+        if n == 0:
+            return [], (0, 0)
+        if n == 1:
+            return [(0, 0)], sizes[0]
+        if n > 300:
+            positions = _pack_large_masonry(sizes)
+            max_x = max(p[0] + s[0] for p, s in zip(positions, sizes))
+            max_y = max(p[1] + s[1] for p, s in zip(positions, sizes))
+            return positions, (max_x, max_y)
+
+        min_area = sum(s[0] * s[1] for s in sizes)
+        max_single_w = max(s[0] for s in sizes)
+        max_single_h = max(s[1] for s in sizes)
+        avg_w = sum(s[0] for s in sizes) / n
+        avg_h = sum(s[1] for s in sizes) / n
+
+        candidates: list[tuple[float, list[tuple[int, int]], tuple[int, int]]] = []
+
+        w_grid = math.ceil(round(math.sqrt(n)) * avg_w * 1.005)
+        w_cols_ceil = math.ceil(math.ceil(math.sqrt(n)) * avg_w * 1.005)
+        w_area_sq = math.ceil(math.sqrt(min_area) * 1.04)
+        w_area_ratio = math.ceil(math.sqrt(min_area * avg_w / max(1.0, avg_h)) * 1.03)
+
+        base_widths = {
+            max(max_single_w, w_grid),
+            max(max_single_w, w_cols_ceil),
+            max(max_single_w, w_area_sq),
+            max(max_single_w, math.ceil(math.sqrt(min_area) * 1.18)),
+            max(max_single_w, math.ceil(math.sqrt(min_area) * 1.32)),
+            max(max_single_w, w_area_ratio),
+        }
+        for w0 in base_widths:
+            w_try = max(max_single_w, w0)
+            h_limit = max(
+                max_single_h,
+                math.ceil((min_area / max(1, w_try)) * 1.28),
+            )
+            for _ in range(10):
+                try:
+                    pos = rpack.pack(sizes, max_width=w_try, max_height=h_limit)
+                    bounds = rpack.bbox_size(sizes, pos)
+                    bw, bh = bounds[0], bounds[1]
+                    ar_penalty = 1.0 + 0.22 * abs(math.log(max(1.0, bw) / max(1.0, bh)))
+                    score = float(bw * bh) * ar_penalty
+                    candidates.append((score, pos, bounds))
+                    break
+                except rpack.PackingImpossibleError:
+                    h_limit = math.ceil(h_limit * 1.10)
+                    w_try = math.ceil(w_try * 1.04)
+
+        if not candidates:
+            pos = rpack.pack(sizes)
+            bounds = rpack.bbox_size(sizes, pos)
+            return pos, bounds
+
+        candidates.sort(key=lambda x: x[0])
+        _, best_pos, best_bounds = candidates[0]
+        return best_pos, best_bounds
+
     def compute_optimal_positions(self, items, gap: int | None = None):
         """Compute (ordered_items, qpositions) for Optimal square/rect packing."""
+        items = self._collapse_stack_units_for_arrange(items)
         if len(items) < 2:
             return list(items), [i.pos() for i in items]
 
         if gap is None:
             gap = self.settings.valueOrDefault('Items/arrange_gap')
 
-        if len(items) <= 300:
-            ordered = list(items)
-            sizes = []
-            for item in ordered:
-                rect = self._item_scene_rect_fast(item)
-                sizes.append((
-                    max(1, round(rect.width() + gap)),
-                    max(1, round(rect.height() + gap)),
-                ))
-            min_area = sum(s[0] * s[1] for s in sizes)
-            max_single_w = max(s[0] for s in sizes)
-            max_single_h = max(s[1] for s in sizes)
-            width = max(
-                max_single_w, max_single_h,
-                math.ceil(math.sqrt(min_area) * 1.06),
+        ordered = list(items) if len(items) <= 300 else sort_by_filename(items)
+        unpadded_rects = [self._arrange_unit_scene_rect(item) for item in ordered]
+        sizes = [
+            (
+                max(1, round(rect.width() + gap)),
+                max(1, round(rect.height() + gap)),
             )
-            positions = None
-            while not positions:
-                try:
-                    positions = rpack.pack(
-                        sizes, max_width=width, max_height=width)
-                except rpack.PackingImpossibleError:
-                    width = math.ceil(width * 1.2)
-            bounds = rpack.bbox_size(sizes, positions)
-        else:
-            ordered = sort_by_filename(items)
-            sizes = []
-            for item in ordered:
-                rect = self._item_scene_rect_fast(item)
-                sizes.append((
-                    max(1, round(rect.width() + gap)),
-                    max(1, round(rect.height() + gap)),
-                ))
-            positions = _pack_large_masonry(sizes)
-            max_x = max(p[0] + s[0] for p, s in zip(positions, sizes))
-            max_y = max(p[1] + s[1] for p, s in zip(positions, sizes))
-            bounds = (max_x, max_y)
+            for rect in unpadded_rects
+        ]
 
+        positions, _ = self.pack_optimal_sizes(sizes)
+        min_x = min(p[0] for p in positions)
+        min_y = min(p[1] for p in positions)
+        max_x = max(p[0] + r.width() for p, r in zip(positions, unpadded_rects))
+        max_y = max(p[1] + r.height() for p, r in zip(positions, unpadded_rects))
+        packed_center = QtCore.QPointF((min_x + max_x) * 0.5, (min_y + max_y) * 0.5)
         center = self.get_selection_center()
-        diff = center - QtCore.QPointF(bounds[0] / 2, bounds[1] / 2)
+        diff = center - packed_center
         qpositions = [QtCore.QPointF(p[0], p[1]) + diff for p in positions]
         return ordered, qpositions
 
     def arrange_optimal(self):
         self.cancel_active_modes()
-        items = self.selectedItems(user_only=True)
+        items = self._collapse_stack_units_for_arrange(
+            self.selectedItems(user_only=True))
         if len(items) < 2:
             return
         ordered, qpositions = self.compute_optimal_positions(items)
@@ -353,7 +522,9 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
     def arrange_square(self):
         self.cancel_active_modes()
         gap = self.settings.valueOrDefault('Items/arrange_gap')
-        items = sort_by_filename(self.selectedItems(user_only=True))
+        raw_items = self._collapse_stack_units_for_arrange(
+            self.selectedItems(user_only=True))
+        items = sort_by_filename(raw_items)
         if len(items) < 2:
             return
 
@@ -398,15 +569,20 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
                 item.enter_crop_mode()
 
     def sample_color_at(self, position):
-        item_at_pos = self.itemAt(position, self.views()[0].transform())
-        if item_at_pos:
-            return item_at_pos.sample_color_at(position)
+        for cand in self.items(
+            position,
+            Qt.ItemSelectionMode.IntersectsItemShape,
+            Qt.SortOrder.DescendingOrder,
+            self.views()[0].transform(),
+        ):
+            if hasattr(cand, 'sample_color_at') and cand.isVisible():
+                return cand.sample_color_at(position)
 
     def select_all_items(self):
         self.cancel_active_modes()
         with self.batch_update():
             for item in self.items():
-                if hasattr(item, 'save_id'):
+                if hasattr(item, 'save_id') and item.isVisible():
                     item.setSelected(True)
 
     def deselect_all_items(self):
@@ -443,15 +619,156 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
                 return getattr(item, 'is_image', False)
         return False
 
+    def create_stack_from_selection(self) -> str | None:
+        self.cancel_active_modes()
+        if self.stack_manager.active_spread_stack_id is not None:
+            self.stack_manager.collapse_spread_stack(animate=False)
+        items = [
+            it for it in self.selectedItems(user_only=True)
+            if getattr(it, 'is_image', False)
+        ]
+        # Also pull in any hidden members of already-selected collapsed stacks
+        seen_ids = {id(it) for it in items}
+        for it in list(items):
+            if getattr(it, 'stack_id', None):
+                for m in self.stack_manager.members_of(it.stack_id):
+                    if id(m) not in seen_ids:
+                        seen_ids.add(id(m))
+                        items.append(m)
+
+        if len(items) < 2:
+            return None
+
+        center = self.get_selection_center()
+        sid = new_stack_id()
+        self.undo_stack.push(
+            commands.CreateStackCommand(self, items, sid, center))
+        return sid
+
+    def unstack_selection(self) -> bool:
+        self.cancel_active_modes()
+        sids = set()
+        if self.stack_manager.active_spread_stack_id:
+            sids.add(self.stack_manager.active_spread_stack_id)
+        for it in self.selectedItems(user_only=True):
+            if getattr(it, 'stack_id', None):
+                sids.add(it.stack_id)
+        if not sids:
+            return False
+        self.undo_stack.beginMacro('Unstack Groups')
+        for sid in sids:
+            self.undo_stack.push(commands.UnstackCommand(self, sid))
+        self.undo_stack.endMacro()
+        return True
+
+    def selected_single_stack_id(self) -> str | None:
+        """If selection corresponds to exactly 1 collapsed Stack Group, return its stack_id."""
+        if self.stack_manager.active_spread_stack_id is not None:
+            return None
+        sel = self.selectedItems(user_only=True)
+        if not sel:
+            return None
+        sids = {getattr(it, 'stack_id', None) for it in sel}
+        if len(sids) == 1:
+            sid = next(iter(sids))
+            if sid:
+                return sid
+        return None
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
             self.event_start = event.scenePos()
-            item_at_pos = self.itemAt(
-                event.scenePos(), self.views()[0].transform())
+            view = self.views()[0]
+            self._event_start_screen = view.mapFromScene(event.scenePos())
+            self._pressed_collapsed_sid = None
+            self._collapsed_dragged = False
+            self._spread_press_item = None
+            self._spread_dragged = False
 
+            item_at_pos = self.itemAt(event.scenePos(), view.transform())
+            if (item_at_pos is not None
+                    and not hasattr(item_at_pos, 'save_id')
+                    and item_at_pos is not self.multi_select_item
+                    and item_at_pos is not self.stack_manager.wash_item):
+                item_at_pos = None
+                for cand in self.items(
+                    event.scenePos(),
+                    Qt.ItemSelectionMode.IntersectsItemShape,
+                    Qt.SortOrder.DescendingOrder,
+                    view.transform(),
+                ):
+                    if (cand is self.multi_select_item
+                            or cand is self.stack_manager.wash_item
+                            or (hasattr(cand, 'save_id') and cand.isVisible())):
+                        item_at_pos = cand
+                        break
+
+            # Resolve MultiSelectItem down to corner handle, underlying user item, or empty gap!
+            if item_at_pos is self.multi_select_item:
+                if (not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                        and self.multi_select_item.hit_handle_at_scene_pos(event.scenePos())):
+                    item_at_pos = self.multi_select_item
+                else:
+                    found_user = None
+                    for cand in self.items(
+                        event.scenePos(),
+                        Qt.ItemSelectionMode.IntersectsItemShape,
+                        Qt.SortOrder.DescendingOrder,
+                        view.transform(),
+                    ):
+                        if hasattr(cand, 'save_id') and cand.isVisible():
+                            found_user = cand
+                            break
+                    if found_user is not None:
+                        item_at_pos = found_user
+                    else:
+                        # Clicked in an empty gap inside multi_select_item or outside actual cards -> start rubberband!
+                        item_at_pos = None
+                        if not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
+                            self.deselect_all_items()
+                        self.active_mode = self.RUBBERBAND_MODE
+                        event.accept()
+                        return
+
+            # --- Case A: Active Spread Session ---
+            active_sid = self.stack_manager.active_spread_stack_id
+            if active_sid is not None:
+                if (item_at_pos is None
+                        or item_at_pos is self.stack_manager.wash_item
+                        or getattr(item_at_pos, 'stack_id', None) != active_sid):
+                    if not self.stack_manager.can_dismiss_spread_by_wash():
+                        event.accept()
+                        return
+                    self.stack_manager.collapse_spread_stack(animate=True)
+                    event.accept()
+                    return
+
+                # Check 1-click Cover Badge on top-left of Spread card
+                local_pt = item_at_pos.mapFromScene(event.scenePos())
+                if hasattr(item_at_pos, 'hit_spread_cover_badge') and item_at_pos.hit_spread_cover_badge(local_pt):
+                    if not item_at_pos.is_stack_cover:
+                        self.undo_stack.push(
+                            commands.SetStackCoverCommand(self, active_sid, item_at_pos))
+                    if hasattr(view, 'show_toast'):
+                        view.show_toast('Đã đặt làm hình đại diện nhóm')
+                    event.accept()
+                    return
+
+                with self.batch_update():
+                    self.clearSelection()
+                    item_at_pos.setSelected(True)
+                    item_at_pos.bring_to_front()
+                self._spread_press_item = item_at_pos
+                self._spread_press_orig_pos = QtCore.QPointF(item_at_pos.pos())
+                self.stack_manager.begin_spread_drag(item_at_pos)
+                self.active_mode = self.MOVE_MODE
+                super().mousePressEvent(event)
+                return
+
+            # --- Case B: Normal Board Mode ---
             if self.edit_item:
                 if item_at_pos != self.edit_item:
                     self.edit_item.exit_edit_mode()
@@ -464,30 +781,114 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
                 else:
                     super().mousePressEvent(event)
                     return
-            if item_at_pos:
+
+            if item_at_pos and hasattr(item_at_pos, 'save_id'):
+                sid = getattr(item_at_pos, 'stack_id', None)
+                if sid:
+                    self._pressed_collapsed_sid = sid
+                    ctrl_held = bool(
+                        event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                    if ctrl_held:
+                        new_state = not item_at_pos.isSelected()
+                        with self.batch_update():
+                            for m in self.stack_manager.members_of(sid):
+                                m.setSelected(new_state and m.isVisible())
+                        event.accept()
+                        return
+                    if not item_at_pos.isSelected():
+                        with self.batch_update():
+                            self.clearSelection()
+                            for m in self.stack_manager.members_of(sid):
+                                if m.isVisible():
+                                    m.setSelected(True)
+                self.active_mode = self.MOVE_MODE
+            elif item_at_pos:
                 self.active_mode = self.MOVE_MODE
             elif self.items():
+                if not (event.modifiers() & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.ShiftModifier
+                )):
+                    self.deselect_all_items()
                 self.active_mode = self.RUBBERBAND_MODE
 
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         self.cancel_active_modes()
-        item = self.itemAt(event.scenePos(), self.views()[0].transform())
-        if item:
+        view = self.views()[0]
+        item = self.itemAt(event.scenePos(), view.transform())
+        if (item is not None
+                and not hasattr(item, 'save_id')
+                and item is not self.multi_select_item):
+            item = None
+            for cand in self.items(
+                event.scenePos(),
+                Qt.ItemSelectionMode.IntersectsItemShape,
+                Qt.SortOrder.DescendingOrder,
+                view.transform(),
+            ):
+                if cand is self.multi_select_item or (hasattr(cand, 'save_id') and cand.isVisible()):
+                    item = cand
+                    break
+        if item is self.multi_select_item:
+            resolved = None
+            for cand in self.items(
+                event.scenePos(),
+                Qt.ItemSelectionMode.IntersectsItemShape,
+                Qt.SortOrder.DescendingOrder,
+                view.transform(),
+            ):
+                if hasattr(cand, 'save_id') and cand.isVisible():
+                    resolved = cand
+                    break
+            if resolved is not None:
+                item = resolved
+            elif self.selected_single_stack_id():
+                sid = self.selected_single_stack_id()
+                self.stack_manager.spread_stack(sid)
+                view.refresh_contextual_toolbar()
+                event.accept()
+                return
+
+        if item and hasattr(item, 'save_id'):
+            sid = getattr(item, 'stack_id', None)
+            if sid and self.stack_manager.active_spread_stack_id is None:
+                self.stack_manager.spread_stack(sid)
+                view.refresh_contextual_toolbar()
+                event.accept()
+                return
             if not item.isSelected():
                 item.setSelected(True)
             if item.is_editable:
                 item.enter_edit_mode()
                 self.mousePressEvent(event)
+            elif getattr(item, 'is_image', False):
+                view.open_detail_stage(item)
             else:
-                self.views()[0].fit_rect(
+                view.fit_rect(
                     self._item_scene_rect_fast(item),
                     toggle_item=item)
             return
         super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event):
+        view = self.views()[0]
+        if hasattr(self, '_event_start_screen'):
+            cur_scr = view.mapFromScene(event.scenePos())
+            moved_px = (cur_scr - self._event_start_screen).manhattanLength()
+        else:
+            moved_px = 0
+
+        if self._spread_press_item is not None and moved_px >= 4:
+            self._spread_dragged = True
+            super().mouseMoveEvent(event)
+            self.stack_manager.update_spread_drag(self._spread_press_item)
+            return
+
+        if self._pressed_collapsed_sid is not None and moved_px >= 4:
+            self._collapsed_dragged = True
+
         if self.active_mode == self.RUBBERBAND_MODE:
             if not self.rubberband_item.scene():
                 self.addItem(self.rubberband_item)
@@ -497,25 +898,84 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
                 self.setSelectionArea(
                     self.rubberband_item.shape(),
                     Qt.ItemSelectionOperation.ReplaceSelection,
-                    Qt.ItemSelectionMode.IntersectsItemBoundingRect,
-                    self.views()[0].transform(),
+                    Qt.ItemSelectionMode.IntersectsItemShape,
+                    view.transform(),
                 )
-            self.views()[0].reset_previous_transform()
+                sids_to_expand = set()
+                for it in list(super().selectedItems()):
+                    if not hasattr(it, 'save_id'):
+                        continue
+                    if not it.isVisible():
+                        it.setSelected(False)
+                    else:
+                        sid = getattr(it, 'stack_id', None)
+                        if sid and self.stack_manager.active_spread_stack_id != sid:
+                            sids_to_expand.add(sid)
+                for sid in sids_to_expand:
+                    for m in self.stack_manager.members_of(sid):
+                        if m.isVisible() and not m.isSelected():
+                            m.setSelected(True)
+            view.reset_previous_transform()
+            event.accept()
+            return
         super().mouseMoveEvent(event)
+        if self.active_mode == self.MOVE_MODE and moved_px >= 1:
+            self.stack_manager.sync_selected_stack_labels()
 
     def mouseReleaseEvent(self, event):
+        view = self.views()[0]
+        # --- Spread Session Release ---
+        if self._spread_press_item is not None:
+            sp_item = self._spread_press_item
+            orig_p = self._spread_press_orig_pos
+            was_dragged = self._spread_dragged
+            self._spread_press_item = None
+            self._spread_dragged = False
+            self.active_mode = None
+            super().mouseReleaseEvent(event)
+
+            if not was_dragged:
+                sp_item.setPos(orig_p)
+                self.stack_manager._dragging_item = None
+                view.open_detail_stage(sp_item)
+            else:
+                self.stack_manager.finish_spread_drag(sp_item, orig_p)
+            return
+
+        # Single-click on a Collapsed Stack keeps it selected for easy Move/Resize;
+        # Double-click (in mouseDoubleClickEvent) spreads the stack.
+        self._pressed_collapsed_sid = None
+        self._collapsed_dragged = False
+
         if self.active_mode == self.RUBBERBAND_MODE:
             self.end_rubberband_mode()
+
         if (self.active_mode == self.MOVE_MODE
                 and self.has_selection()
                 and self.multi_select_item.active_mode is None
                 and self.selectedItems()[0].active_mode is None):
             delta = event.scenePos() - self.event_start
             if not delta.isNull():
+                sel_user = self.selectedItems(user_only=True)
+                # Gather hidden deep members of any moved collapsed stacks
+                hidden_comp = []
+                seen_sids = {
+                    it.stack_id for it in sel_user
+                    if getattr(it, 'stack_id', None)
+                    and self.stack_manager.active_spread_stack_id != it.stack_id
+                }
+                sel_ids = {id(it) for it in sel_user}
+                for sid in seen_sids:
+                    for m in self.stack_manager.members_of(sid):
+                        if id(m) not in sel_ids and not m.isVisible():
+                            hidden_comp.append(m)
                 self.undo_stack.push(
-                    commands.MoveItemsBy(self.selectedItems(user_only=True),
-                                         delta,
-                                         ignore_first_redo=True))
+                    commands.MoveItemsBy(
+                        sel_user,
+                        delta,
+                        ignore_first_redo=True,
+                        hidden_companions=hidden_comp,
+                    ))
         self.active_mode = None
         super().mouseReleaseEvent(event)
 
@@ -539,7 +999,7 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
             item.save_id = None
 
     def on_view_scale_change(self):
-        """Only update handle geometry on the 1 active selection box (O(1))."""
+        """Only update handle geometry on the 1 active selection box (O(1)) and stack labels (O(G))."""
         if self.multi_select_item.scene():
             self.multi_select_item.on_view_scale_change()
         elif self.has_single_selection():
@@ -547,6 +1007,8 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
                 if hasattr(item, 'save_id'):
                     item.on_view_scale_change()
                     break
+        if hasattr(self, 'stack_manager') and hasattr(self.stack_manager, 'sync_all_stack_labels'):
+            self.stack_manager.sync_all_stack_labels()
 
     def itemsBoundingRect(self, selection_only=False, items=None):
         """Cached O(1) scene/selection bounding box using C++ QTransform.mapRect."""
@@ -559,11 +1021,11 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
         elif selection_only:
             if self._cached_sel_bounds is not None:
                 return QtCore.QRectF(self._cached_sel_bounds)
-            base = [i for i in super().selectedItems() if hasattr(i, 'save_id')]
+            base = [i for i in super().selectedItems() if hasattr(i, 'save_id') and i.isVisible()]
         else:
             if self._cached_all_bounds is not None:
                 return QtCore.QRectF(self._cached_all_bounds)
-            base = [i for i in self.items() if hasattr(i, 'save_id')]
+            base = [i for i in self.items() if hasattr(i, 'save_id') and i.isVisible()]
 
         if not base:
             empty = QtCore.QRectF(0, 0, 0, 0)
@@ -616,6 +1078,25 @@ class BeeGraphicsScene(QtWidgets.QGraphicsScene):
         if self._batch_depth > 0:
             self._batch_dirty_selection = True
             return
+
+        # Keep visible members of any collapsed stack selected together as one unit
+        if not self._expanding_stack_sel and self.stack_manager.active_spread_stack_id is None:
+            raw_sel = [i for i in super().selectedItems() if hasattr(i, 'save_id')]
+            invis_sel = [i for i in raw_sel if not i.isVisible()]
+            vis_sel = [i for i in raw_sel if i.isVisible()]
+            sids = {i.stack_id for i in vis_sel if getattr(i, 'stack_id', None)}
+            if invis_sel or sids:
+                self._expanding_stack_sel = True
+                try:
+                    for it in invis_sel:
+                        it.setSelected(False)
+                    for sid in sids:
+                        for m in self.stack_manager.members_of(sid):
+                            if m.isVisible() and not m.isSelected():
+                                m.setSelected(True)
+                    self._cached_sel_bounds = None
+                finally:
+                    self._expanding_stack_sel = False
 
         multi = self.has_multi_selection()
         if multi:

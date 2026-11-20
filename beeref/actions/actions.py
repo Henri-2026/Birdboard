@@ -273,6 +273,20 @@ actions = ActionList([
         callback='on_action_arrange_gap',
     ),
     Action(
+        id='stack_group',
+        text='&Stack Group (Xếp chồng)',
+        shortcuts=['Ctrl+G'],
+        callback='on_action_stack_group',
+        group='active_when_selection',
+    ),
+    Action(
+        id='unstack_group',
+        text='&Unstack Group (Tách chồng)',
+        shortcuts=['Ctrl+Shift+G'],
+        callback='on_action_unstack_group',
+        group='active_when_selection',
+    ),
+    Action(
         id='change_opacity',
         text='Change &Opacity...',
         callback='on_action_change_opacity',

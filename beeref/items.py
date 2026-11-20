@@ -23,11 +23,12 @@ import logging
 import math
 import os.path
 import pathlib
+import time
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt
 
-from beeref import commands
+from beeref import commands, constants
 from beeref.config import BeeSettings
 from beeref.constants import COLORS
 from beeref.lod_cache import (
@@ -47,6 +48,102 @@ from beeref.selection import SelectableMixin
 logger = logging.getLogger(__name__)
 
 item_registry = {}
+_CARD_SHADOW_ATLAS_CACHE: dict[int, QtGui.QPixmap] = {}
+_SHADOW_ATLAS_SZ = 128
+_SHADOW_BOX_INSET = 28
+_SHADOW_SLICE_M = 42
+
+
+def _get_card_shadow_atlas(peak_alpha: int) -> QtGui.QPixmap:
+    """Build & cache a 128x128 C++ Gaussian-blurred 9-patch shadow atlas (~64 KB)."""
+    cached = _CARD_SHADOW_ATLAS_CACHE.get(peak_alpha)
+    if cached is not None:
+        return cached
+
+    sz = _SHADOW_ATLAS_SZ
+    ins = _SHADOW_BOX_INSET
+    src_pm = QtGui.QPixmap(sz, sz)
+    src_pm.fill(Qt.GlobalColor.transparent)
+    sp = QtGui.QPainter(src_pm)
+    sp.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    sp.setPen(Qt.PenStyle.NoPen)
+    sp.setBrush(QtGui.QColor(0, 0, 0, peak_alpha))
+    sp.drawRoundedRect(
+        QtCore.QRectF(float(ins), float(ins), float(sz - 2 * ins), float(sz - 2 * ins)),
+        2.0,
+        2.0,
+    )
+    sp.end()
+
+    sc = QtWidgets.QGraphicsScene(0.0, 0.0, float(sz), float(sz))
+    pm_item = QtWidgets.QGraphicsPixmapItem(src_pm)
+    blur = QtWidgets.QGraphicsBlurEffect()
+    blur.setBlurRadius(13.5)
+    blur.setBlurHints(QtWidgets.QGraphicsBlurEffect.BlurHint.QualityHint)
+    pm_item.setGraphicsEffect(blur)
+    sc.addItem(pm_item)
+
+    img = QtGui.QImage(sz, sz, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    op = QtGui.QPainter(img)
+    op.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    sc.render(
+        op,
+        QtCore.QRectF(0.0, 0.0, float(sz), float(sz)),
+        QtCore.QRectF(0.0, 0.0, float(sz), float(sz)),
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+    )
+    op.end()
+
+    out_pm = QtGui.QPixmap.fromImage(img)
+    _CARD_SHADOW_ATLAS_CACHE[peak_alpha] = out_pm
+    return out_pm
+
+
+def _draw_soft_card_shadow(painter: QtGui.QPainter, rect: QtCore.QRectF, px_unit: float, is_dark: bool):
+    """Paint a silky-smooth 9-patch Gaussian shadow beneath `rect` (zero hard edges)."""
+    if rect.width() <= 0.0 or rect.height() <= 0.0:
+        return
+    peak_alpha = 112 if is_dark else 46
+    atlas = _get_card_shadow_atlas(peak_alpha)
+
+    pad = max(18.0, 0.045 * max(rect.width(), rect.height()))
+    y_shift = min(3.8 * px_unit, pad * 0.12)
+    box = rect.translated(0.0, y_shift)
+    in_raw = float(_SHADOW_SLICE_M - _SHADOW_BOX_INSET)  # 14.0
+    out_raw = float(_SHADOW_BOX_INSET)                   # 28.0
+    scale_s = min(
+        0.88 * px_unit,
+        (pad * 0.85) / out_raw,
+        box.width() / (2.3 * in_raw),
+        box.height() / (2.3 * in_raw),
+    )
+    if scale_s <= 1e-6:
+        return
+
+    out_p = out_raw * scale_s
+    in_p = in_raw * scale_s
+    xs = (box.left() - out_p, box.left() + in_p, box.right() - in_p, box.right() + out_p)
+    ys = (box.top() - out_p, box.top() + in_p, box.bottom() - in_p, box.bottom() + out_p)
+    s_coords = (0.0, float(_SHADOW_SLICE_M), float(_SHADOW_ATLAS_SZ - _SHADOW_SLICE_M), float(_SHADOW_ATLAS_SZ))
+
+    for r in range(3):
+        dy = ys[r + 1] - ys[r]
+        if dy <= 0.0:
+            continue
+        sy = s_coords[r]
+        sh = s_coords[r + 1] - sy
+        for c in range(3):
+            dx = xs[c + 1] - xs[c]
+            if dx <= 0.0:
+                continue
+            sx = s_coords[c]
+            sw = s_coords[c + 1] - sx
+            painter.drawPixmap(
+                QtCore.QRectF(xs[c], ys[r], dx, dy),
+                atlas,
+                QtCore.QRectF(sx, sy, sw, sh),
+            )
 
 
 def register_item(cls):
@@ -89,7 +186,15 @@ class BeeItemMixin(SelectableMixin):
         self.setPos(pos - self.center_scene_coords)
 
     def has_selection_outline(self):
-        return self.isSelected()
+        if not self.isSelected():
+            return False
+        sc = self.scene()
+        if (sc is not None
+                and getattr(self, 'stack_id', None)
+                and hasattr(sc, 'stack_manager')
+                and sc.stack_manager.active_spread_stack_id != self.stack_id):
+            return False
+        return True
 
     def has_selection_handles(self):
         return (self.isSelected()
@@ -144,6 +249,30 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         self._source_bytes: bytes | None = None
         self._bee_source: tuple[str, int] | None = None
         self.thumb_pixmap = QtGui.QPixmap()
+
+        # Stack Group & Detail Stage metadata
+        self.stack_id: str | None = None
+        self.is_stack_cover: bool = False
+        self.stack_order: int = 0
+        self.stack_name: str = ''
+        self.custom_title: str = ''
+        self.note: str = ''
+        self.palette_hex: list[str] = []
+        self.stack_saved_scale: float | None = None
+        self.stack_saved_rot: float | None = None
+        self._hover_inside: bool = False
+        self._hover_lift: float = 0.0
+        self._hover_target: float = 0.0
+        self._hover_from: float = 0.0
+        self._hover_t0: float = 0.0
+
+        if self._source_path:
+            try:
+                self.created_ts: float = os.path.getctime(self._source_path)
+            except OSError:
+                self.created_ts = time.time()
+        else:
+            self.created_ts = time.time()
 
         if payload is not None:
             self._apply_lod_payload(payload)
@@ -220,6 +349,19 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
             item.crop = QtCore.QRectF(*data['crop'])
         item.setOpacity(data.get('opacity', 1))
         item.grayscale = data.get('grayscale', False)
+        item.stack_id = data.get('stack_id')
+        item.is_stack_cover = bool(data.get('is_stack_cover', False))
+        item.stack_order = int(data.get('stack_order', 0))
+        item.stack_name = str(data.get('stack_name', '') or '')
+        item.custom_title = str(data.get('custom_title', '') or '')
+        item.note = str(data.get('note', '') or '')
+        item.palette_hex = list(data.get('palette_hex', []) or [])
+        if data.get('created_ts'):
+            item.created_ts = float(data['created_ts'])
+        if data.get('stack_saved_scale') is not None:
+            item.stack_saved_scale = float(data['stack_saved_scale'])
+        if data.get('stack_saved_rot') is not None:
+            item.stack_saved_rot = float(data['stack_saved_rot'])
         return item
 
     def __str__(self):
@@ -364,16 +506,91 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         return self.crop
 
     def contains(self, point):
-        return self.boundingRect().contains(point)
+        return self.bounding_rect_unselected().contains(point)
 
     def get_extra_save_data(self):
-        return {'filename': self.filename,
-                'opacity': self.opacity(),
-                'grayscale': self.grayscale,
-                'crop': [self.crop.topLeft().x(),
-                         self.crop.topLeft().y(),
-                         self.crop.width(),
-                         self.crop.height()]}
+        extra = {
+            'filename': self.filename,
+            'opacity': self.opacity(),
+            'grayscale': self.grayscale,
+            'crop': [
+                self.crop.topLeft().x(),
+                self.crop.topLeft().y(),
+                self.crop.width(),
+                self.crop.height(),
+            ],
+            'created_ts': self.created_ts,
+        }
+        if self.stack_id:
+            extra['stack_id'] = self.stack_id
+            extra['is_stack_cover'] = self.is_stack_cover
+            extra['stack_order'] = self.stack_order
+            if self.stack_name:
+                extra['stack_name'] = self.stack_name
+            if self.stack_saved_scale is not None:
+                extra['stack_saved_scale'] = self.stack_saved_scale
+            if self.stack_saved_rot is not None:
+                extra['stack_saved_rot'] = self.stack_saved_rot
+        if self.custom_title:
+            extra['custom_title'] = self.custom_title
+        if self.note:
+            extra['note'] = self.note
+        if self.palette_hex:
+            extra['palette_hex'] = self.palette_hex
+        return extra
+
+    @property
+    def display_filename(self) -> str:
+        if self.custom_title:
+            return self.custom_title
+        if self.filename:
+            base = os.path.basename(str(self.filename))
+            if base:
+                return base
+        ext = self._img_format if self._img_format in ('jpg', 'png') else 'png'
+        return f'Image.{ext}'
+
+    def _is_collapsed_stack_cover(self) -> bool:
+        if not (self.stack_id and self.is_stack_cover):
+            return False
+        sc = self.scene()
+        if sc and hasattr(sc, 'stack_manager'):
+            if sc.stack_manager.active_spread_stack_id == self.stack_id:
+                return False
+        return True
+
+    def _collapsed_pile_local_rect(self) -> QtCore.QRectF:
+        rect = QtCore.QRectF(self.crop)
+        sc = self.scene()
+        if sc and hasattr(sc, 'stack_manager') and self.stack_id:
+            for m in sc.stack_manager.visible_pile_members_fast(self.stack_id):
+                if m is not self:
+                    rect = rect.united(self.mapRectFromItem(m, m.crop))
+        return rect
+
+    def boundingRect(self):
+        r = self.bounding_rect_unselected()
+        pad = max(18.0, 0.045 * max(r.width(), r.height()))
+        padded = r.adjusted(-pad, -pad, pad, pad * 1.15)
+        if self.has_selection_handles():
+            return padded.united(super().boundingRect())
+        return padded
+
+    def hit_spread_cover_badge(self, item_pos: QtCore.QPointF) -> bool:
+        sc = self.scene()
+        if not (self.stack_id and sc and hasattr(sc, 'stack_manager')):
+            return False
+        if sc.stack_manager.active_spread_stack_id != self.stack_id:
+            return False
+        diam = self.fixed_length_for_viewport(24.0)
+        pad = self.fixed_length_for_viewport(10.0)
+        badge_r = QtCore.QRectF(
+            self.crop.left() + pad,
+            self.crop.top() + pad,
+            diam,
+            diam,
+        )
+        return badge_r.adjusted(-pad * 0.3, -pad * 0.3, pad * 0.3, pad * 0.3).contains(item_pos)
 
     def get_thumb_save_bytes(self) -> bytes:
         """Encoded Tier-0 thumbnail bytes for instant .bee project loading."""
@@ -385,8 +602,9 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         save_id = self.save_id or save_id_default
         assert save_id is not None
 
-        if self.filename:
-            basename = os.path.splitext(os.path.basename(self.filename))[0]
+        chosen_name = self.custom_title or self.filename
+        if chosen_name:
+            basename = os.path.splitext(os.path.basename(str(chosen_name)))[0]
             return f'{save_id:04}-{basename}.{imgformat}'
         else:
             return f'{save_id:04}.{imgformat}'
@@ -462,6 +680,7 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
     def setPixmap(self, pixmap):
         LODCacheManager.instance().evict_item(self)
         if pixmap is None or pixmap.isNull():
+            self.prepareGeometryChange()
             self._orig_width = 0
             self._orig_height = 0
             self.thumb_pixmap = QtGui.QPixmap()
@@ -477,6 +696,7 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         if payload is not None:
             self._apply_lod_payload(payload)
         else:
+            self.prepareGeometryChange()
             self._orig_width = 0
             self._orig_height = 0
             self.thumb_pixmap = QtGui.QPixmap()
@@ -501,6 +721,10 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
         item.crop = QtCore.QRectF(self.crop)
         item.setOpacity(self.opacity())
         item.grayscale = self.grayscale
+        item.custom_title = self.custom_title
+        item.note = self.note
+        item.palette_hex = list(self.palette_hex)
+        item.created_ts = self.created_ts
         return item
 
     @cached_property
@@ -671,7 +895,9 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
 
         ct = painter.combinedTransform()
         item_to_device = math.hypot(ct.m11(), ct.m12())
-        screen_max_edge = self.max_orig_edge * item_to_device
+        dpr = max(1.0, float(painter.device().devicePixelRatioF())) if painter.device() else 1.0
+        item_to_logical = item_to_device / dpr
+        screen_max_edge = self.max_orig_edge * item_to_logical
         if item_to_device < 2.0:
             painter.setRenderHint(painter.RenderHint.SmoothPixmapTransform)
 
@@ -700,13 +926,46 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
                 self.draw_crop_rect(painter, handle())
             self.draw_crop_rect(painter, self.crop_temp)
         else:
-            if widget is not None and screen_max_edge > 150 and self.opacity() > 0.85:
-                # Subtle LOD-gated card shadow (skipped automatically when zoomed out on 1000+ images)
-                inv = 1.0 / max(0.05, item_to_device)
-                sh_off = min(14.0, 4.0 * inv)
-                sh_pad = min(8.0, 1.5 * inv)
-                sh_rect = self.crop.adjusted(-sh_pad, -sh_pad + sh_off, sh_pad, sh_pad + sh_off)
-                painter.fillRect(sh_rect, QtGui.QColor(0, 0, 0, 28))
+            px_unit = 1.0 / max(0.03, item_to_logical)
+            crop_max = max(self.crop.width(), self.crop.height())
+            pad = max(18.0, 0.045 * crop_max)
+
+            has_raster_target = (
+                widget is not None
+                or isinstance(painter.device(), (QtGui.QPixmap, QtGui.QImage))
+            )
+            if has_raster_target and screen_max_edge > 90 and self.opacity() > 0.80:
+                # Silky-smooth 9-patch Gaussian drop shadow (LOD-gated for 1000+ image speed)
+                _draw_soft_card_shadow(
+                    painter,
+                    self.crop,
+                    px_unit,
+                    is_dark=(constants.ACTIVE_THEME == 'dark'),
+                )
+
+            did_hover_tx = False
+            if abs(self._hover_lift) > 1e-3 and screen_max_edge > 45.0:
+                sc = self.scene()
+                is_underlay = bool(
+                    self.stack_id
+                    and not self.is_stack_cover
+                    and sc is not None
+                    and hasattr(sc, 'stack_manager')
+                    and sc.stack_manager.active_spread_stack_id != self.stack_id
+                )
+                base_px = 3.2 if is_underlay else 4.6
+                max_frac = 0.013 if is_underlay else 0.018
+                raw_lift_frac = min(max_frac, max(0.008, base_px / max(60.0, screen_max_edge))) * self._hover_lift
+                max_safe_frac = (pad * 0.35) / max(1.0, crop_max * 0.5)
+                lift_frac = max(-max_safe_frac, min(max_safe_frac, raw_lift_frac))
+                max_dy = pad * 0.25
+                lift_dy = max(-max_dy, min(max_dy, min(1.1 * px_unit, max_dy) * self._hover_lift))
+                c = self.crop.center()
+                painter.save()
+                did_hover_tx = True
+                painter.translate(c.x(), c.y() - lift_dy)
+                painter.scale(1.0 + lift_frac, 1.0 + lift_frac)
+                painter.translate(-c.x(), -c.y())
 
             if pm.width() == self._orig_width and pm.height() == self._orig_height:
                 src_rect = self.crop
@@ -720,7 +979,56 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
                     self.crop.height() * sy,
                 )
             painter.drawPixmap(self.crop, pm, src_rect)
+            if did_hover_tx:
+                painter.restore()
+            self._paint_stack_overlays(painter, item_to_device)
             self.paint_selectable(painter, option, widget)
+
+    def _paint_stack_overlays(self, painter: QtGui.QPainter, item_to_device: float):
+        if not self.stack_id or item_to_device <= 1e-5:
+            return
+        dpr = max(1.0, float(painter.device().devicePixelRatioF())) if painter.device() else 1.0
+        item_to_logical = item_to_device / dpr
+        if item_to_logical <= 1e-5:
+            return
+        sc = self.scene()
+        is_spread = (
+            sc is not None
+            and hasattr(sc, 'stack_manager')
+            and sc.stack_manager.active_spread_stack_id == self.stack_id
+        )
+
+        # Spread Mode only: Cover Radio-Check Badge at top-left of card
+        # (Collapsed [N] count and group name are painted by StackOverlayLabelItem)
+        if is_spread and (self.is_stack_cover or self._hover_inside):
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            px_unit = 1.0 / item_to_logical
+            diam = 24.0 * px_unit
+            pad = 10.0 * px_unit
+            cx = self.crop.left() + pad + diam * 0.5
+            cy = self.crop.top() + pad + diam * 0.5
+            painter.translate(cx, cy)
+            painter.scale(px_unit, px_unit)
+
+            r_local = QtCore.QRectF(-12.0, -12.0, 24.0, 24.0)
+            if self.is_stack_cover:
+                painter.setBrush(QtGui.QColor('#FFDA12'))
+                painter.setPen(QtGui.QPen(QtGui.QColor('#E5C100'), 1.5))
+                painter.drawEllipse(r_local)
+                ck = QtGui.QPen(QtGui.QColor('#1A1A1C'), 2.1)
+            else:
+                painter.setBrush(QtGui.QColor(255, 255, 255, 215))
+                painter.setPen(QtGui.QPen(QtGui.QColor(26, 26, 28, 90), 1.3))
+                painter.drawEllipse(r_local)
+                ck = QtGui.QPen(QtGui.QColor(26, 26, 28, 120), 1.8)
+
+            ck.setCapStyle(Qt.PenCapStyle.RoundCap)
+            ck.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(ck)
+            painter.drawLine(QtCore.QPointF(-4.5, 0.3), QtCore.QPointF(-1.2, 3.6))
+            painter.drawLine(QtCore.QPointF(-1.2, 3.6), QtCore.QPointF(4.8, -3.2))
+            painter.restore()
 
     def enter_crop_mode(self):
         logger.debug(f'Entering crop mode on {self}')
@@ -754,6 +1062,25 @@ class BeePixmapItem(BeeItemMixin, QtWidgets.QGraphicsPixmapItem):
             self.exit_crop_mode(confirm=False)
         else:
             super().keyPressEvent(event)
+
+    def hoverEnterEvent(self, event):
+        self._hover_inside = True
+        sc = self.scene()
+        if sc is not None and hasattr(sc, 'on_item_hover_changed'):
+            sc.on_item_hover_changed(self, True)
+        if self.stack_id:
+            self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        if self._hover_inside:
+            self._hover_inside = False
+            sc = self.scene()
+            if sc is not None and hasattr(sc, 'on_item_hover_changed'):
+                sc.on_item_hover_changed(self, False)
+            if self.stack_id:
+                self.update()
+        super().hoverLeaveEvent(event)
 
     def hoverMoveEvent(self, event):
         if not self.crop_mode:
@@ -902,7 +1229,7 @@ class BeeTextItem(BeeItemMixin, QtWidgets.QGraphicsTextItem):
         return {'text': self.toPlainText()}
 
     def contains(self, point):
-        return self.boundingRect().contains(point)
+        return self.bounding_rect_unselected().contains(point)
 
     def paint(self, painter, option, widget):
         painter.setPen(Qt.PenStyle.NoPen)
@@ -997,7 +1324,7 @@ class BeeErrorItem(BeeItemMixin, QtWidgets.QGraphicsTextItem):
         return (f'Error "{txt}"')
 
     def contains(self, point):
-        return self.boundingRect().contains(point)
+        return self.bounding_rect_unselected().contains(point)
 
     def paint(self, painter, option, widget):
         painter.setPen(Qt.PenStyle.NoPen)

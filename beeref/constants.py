@@ -2,9 +2,9 @@
 
 APPNAME = 'Birdboard'
 APPNAME_FULL = f'{APPNAME} Reference Board'
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 WEBSITE = 'https://github.com/Henri-2026/Birdboard'
-COPYRIGHT = 'Birdboard v1.0.0 (based on open-source BeeRef)'
+COPYRIGHT = 'Birdboard v1.1.0 (based on open-source BeeRef)'
 
 CHANGED_SYMBOL = '✎'
 
@@ -12,7 +12,7 @@ THEMES = {
     'light': {
         'Scene:Canvas': (233, 234, 236),      # #E9EAEC Studio Light Gray
         'Scene:Text': (28, 28, 34),           # #1C1C22 Crisp Dark Ink
-        'Scene:Selection': (58, 130, 247),    # #3A82F7 Penart Accent Blue
+        'Scene:Selection': (58, 60, 66),      # #3A3C42 Refined Dark Charcoal Gray
         'Welcome:Bg': '#E9EAEC',
         'Welcome:TextPrimary': '#27272A',
         'Welcome:TextSecondary': '#71717A',
@@ -20,7 +20,7 @@ THEMES = {
     'dark': {
         'Scene:Canvas': (26, 26, 29),         # #1A1A1D Penart Matte Dark
         'Scene:Text': (242, 242, 247),        # #F2F2F7 Penart Primary Text
-        'Scene:Selection': (58, 130, 247),    # #3A82F7 Penart Accent Blue
+        'Scene:Selection': (168, 170, 178),   # #A8AAB2 Crisp Slate Gray on Dark
         'Welcome:Bg': '#1A1A1D',
         'Welcome:TextPrimary': '#F2F2F7',
         'Welcome:TextSecondary': '#9A9AA2',
@@ -48,7 +48,7 @@ COLORS = {
     'Disabled:Light': (0, 0, 0, 0),
     'Disabled:Text': (154, 154, 162),
 
-    'Scene:Selection': (58, 130, 247),
+    'Scene:Selection': (58, 60, 66),
     'Scene:Canvas': (233, 234, 236),
     'Scene:Text': (28, 28, 34),
 }

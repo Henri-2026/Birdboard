@@ -22,8 +22,8 @@ a = Analysis(
     binaries=[],
     datas=[
         (join('beeref', 'documentation'), join('beeref', 'documentation')),
-        (join('beeref', 'assets', '*.png'), join('beeref', 'assets'))],
-    hiddenimports=['PyQt6.QtOpenGLWidgets', 'PyQt6.QtOpenGL'],
+        (join('beeref', 'assets'), join('beeref', 'assets'))],
+    hiddenimports=['PyQt6.QtOpenGLWidgets', 'PyQt6.QtOpenGL', 'PyQt6.QtSvg'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

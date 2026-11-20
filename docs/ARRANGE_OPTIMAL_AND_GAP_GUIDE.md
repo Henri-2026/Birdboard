@@ -35,24 +35,34 @@ Khoảng cách `Arrange Gap` (tính bằng đơn vị `px` trong không gian Can
 
 ---
 
-## Phần 2 — Giải Phẫu Thuật Toán Sắp Xếp Khối Vuông (Dành Cho Developer & AI Agent)
+## Phần 2 — Giải Phẫu Thuật Toán Sắp Xếp Khối Vuông (Cập nhật `v1.1.0` — Dành Cho Developer & AI Agent)
+
+> **Liên kết quan trọng (`v1.1.0`):** Động cơ `pack_optimal_sizes()` dưới đây hiện được **dùng chung hợp nhất** cho cả lệnh sắp xếp ngoài bảng (`Shift + O`) lẫn chế độ bung lưới xem **Nhóm Xếp Chồng (`Spread Optimal`)**. Xem trọn bộ quy tắc Nhóm Xếp Chồng và tương tác tại [STACK_GROUP_AND_ARRANGEMENT_GUIDE.md](STACK_GROUP_AND_ARRANGEMENT_GUIDE.md).
 
 Mã nguồn thực thi nằm tại:
-- `beeref/scene.py` → hàm `compute_optimal_positions()`, `arrange_optimal()`, và `_pack_large_masonry()`
-- `beeref/commands.py` → class `ArrangeItems`
+- `beeref/scene.py` → hàm `pack_optimal_sizes()`, `_pack_large_masonry()`, `compute_optimal_positions()`, `_collapse_stack_units_for_arrange()`, `_arrange_unit_scene_rect()`, và `arrange_optimal()`
+- `beeref/stack_manager.py` → hàm `compute_spread_grid()` (gọi thẳng `scene.pack_optimal_sizes()`)
+- `beeref/commands.py` → class `ArrangeItems` (kèm `_move_collapsed_companions()` cho Nhóm Xếp Chồng)
 - `beeref/widgets/__init__.py` → class `ArrangeGapDialog`
 
-### 2.1. Bước 1: Đo khung bao thực tế và cộng biên khoảng cách `gap`
-Mỗi bức ảnh trên Canvas có thể đã bị `scale`, `rotate`, `flip` hoặc `crop`. Do đó tuyệt đối không lấy kích thước ảnh gốc mà phải lấy **khung bao trục tọa độ Scene thực tế (`Axis-Aligned Scene Bounding Box`)** thông qua ma trận biến đổi C++:
+### 2.1. Bước 1: Rút Gọn Đơn Vị Nhóm (`Stack-Aware`), Đo Khung Bao Thực Tế & Cộng Biên `gap`
+1. **Rút gọn Nhóm Xếp Chồng thu gọn thành 1 đơn vị (`v1.1.0`):**
+   - Trước khi tính tọa độ, `_collapse_stack_units_for_arrange(items)` gom tất cả các thẻ thuộc cùng một Nhóm đang thu gọn về **duy nhất 1 đại diện (`Cover`)**, tránh việc `Shift + O` làm vỡ bung các tấm ảnh underlay ra khỏi xấp.
+2. **Đo khung bao trục tọa độ Scene thực tế (`Axis-Aligned Scene Bounding Box`):**
+   - Với ảnh đơn (có thể đã `scale`, `rotate`, `flip`, `crop`): đo `item.bounding_rect_unselected()`.
+   - Với Cover của một Nhóm đang thu gọn: `_arrange_unit_scene_rect(item)` đo **toàn bộ diện tích xấp ảnh đang xòe** thông qua `item._collapsed_pile_local_rect()` để các nhóm sau khi xếp không bị chồng lấn mép ảnh underlay lên nhau:
 
 ```python
-rect = item.sceneTransform().mapRect(item.bounding_rect_unselected())
+if hasattr(item, '_is_collapsed_stack_cover') and item._is_collapsed_stack_cover():
+    rect = item.sceneTransform().mapRect(item._collapsed_pile_local_rect())
+else:
+    rect = item.sceneTransform().mapRect(item.bounding_rect_unselected())
 ```
 
-Sau đó cộng thêm giá trị khoảng cách `gap` vào cả chiều rộng lẫn chiều cao của từng hộp chữ nhật thứ $i$:
-$$w_i' = \max(1, \text{round}(\text{rect}_i.\text{width} + \text{gap})), \quad h_i' = \max(1, \text{round}(\text{rect}_i.\text{height} + \text{gap}))$$
+3. **Cộng biên khoảng cách `gap`:**
+   $$w_i' = \max(1, \text{round}(\text{rect}_i.\text{width} + \text{gap})), \quad h_i' = \max(1, \text{round}(\text{rect}_i.\text{height} + \text{gap}))$$
 
-*(Nhờ cộng `gap` trực tiếp vào kích thước hộp bao khi đưa vào bộ xếp hình, mỗi bức ảnh tự động giữ khoảng cách đúng bằng `gap` với ảnh bên phải và ảnh bên dưới mà không cần tính lại va chạm).*
+*(Nhờ cộng `gap` trực tiếp vào kích thước hộp bao khi đưa vào bộ xếp hình, mỗi bức ảnh/nhóm tự động giữ khoảng cách đúng bằng `gap` với phần tử bên phải và bên dưới mà không cần tính lại va chạm).*
 
 ---
 
@@ -64,23 +74,29 @@ Bài toán *2D Rectangle Bin Packing* (xếp $N$ hình chữ nhật bất kỳ v
 
 ```mermaid
 flowchart TD
-    A["Danh sách N hình chữ nhật (w_i + gap, h_i + gap)"] --> B{"Số lượng N <= 300?"}
-    B -- "Đúng (N <= 300)" --> C["Chế độ 1: Exact 2D Bin-Packing (rpack Cython)"]
-    B -- "Sai (N > 300 tới 10.000+)" --> D["Chế độ 2: Fast Masonry Column Heap O(N log K)"]
-    C --> E["Dịch tâm khối kết quả về đúng tâm vùng chọn cũ"]
+    A["Danh sách N đơn vị ảnh/nhóm (w_i + gap, h_i + gap)"] --> B{"Số lượng N <= 300?"}
+    B -- "Đúng (N <= 300)" --> C["Chế độ 1: Multi-Width Pure rpack.pack (6 bề rộng mục tiêu + chấm điểm aspect/area)"]
+    B -- "Sai (N > 300 tới 10.000+)" --> D["Chế độ 2: Fast Masonry Column Heap O(N log K) dưới 5ms"]
+    C --> E["Căn tâm chuẩn 0.0px trên khung thực không cộng dư gap/2"]
     D --> E
-    E --> F["Gán vị trí đồng loạt trong scene.batch_update()"]
+    E --> F["Gán vị trí đồng loạt + dịch chuyển đồng bộ thẻ ẩn trong nhóm (batch_update)"]
 ```
 
-#### Chế độ 1 — Dưới hoặc bằng 300 hình: Exact Bin-Packing với `rectangle-packer` (`rpack`)
-1. **Ước lượng cạnh hình vuông khởi điểm $W_0$:**
-   Tổng diện tích lý tưởng tối thiểu là $A_{\min} = \sum_{i=1}^{N} w_i' \cdot h_i'$. Cạnh hình vuông khởi điểm được lấy bằng:
-   $$W_0 = \max\left(\max_i w_i',\ \max_i h_i',\ \lceil \sqrt{A_{\min}} \times 1.06 \rceil\right)$$
-   *(Hệ số bù khe hở `1.06` giúp 90% trường hợp xếp thành công ngay ở lần thử đầu tiên mà không tốn vòng lặp thử sai).*
-2. **Vòng lặp nới biên an toàn:**
-   Gọi `rpack.pack(sizes, max_width=W, max_height=W)`. Nếu các hình có tỷ lệ quá dị biệt khiến không nhét vừa hộp $W \times W$ (`PackingImpossibleError`), tăng cạnh hộp lên $20\%$ ($W \leftarrow \lceil 1.2 \times W \rceil$) và thử lại cho tới khi thành công.
+#### Chế độ 1 — Dưới hoặc bằng 300 đơn vị: Multi-Width Pure `rpack.pack` (`v1.1.0`)
+Thay vì chỉ thử 1 cạnh hình vuông đơn lẻ (có thể sinh ra cột cao gầy `2 × 7` với ảnh đủ tỷ lệ hoặc rớt lẻ 1 ảnh xuống hàng dưới), `pack_optimal_sizes()` đánh giá đồng thời **6 bề rộng khởi điểm (`base_widths`)**:
+1. $w_{\text{grid}} = \lceil \text{round}(\sqrt{N}) \cdot \bar{w} \cdot 1.005 \rceil$ *(khóa lưới vuông đẹp như `4 × 4` cho 16 ảnh cùng tỷ lệ)*
+2. $w_{\text{cols\_ceil}} = \lceil \lceil \sqrt{N} \rceil \cdot \bar{w} \cdot 1.005 \rceil$
+3. $w_{\text{area\_sq}} = \lceil \sqrt{A_{\min}} \cdot 1.04 \rceil$
+4. $\lceil \sqrt{A_{\min}} \cdot 1.18 \rceil$ và $\lceil \sqrt{A_{\min}} \cdot 1.32 \rceil$ *(cho tập ảnh pha trộn tỷ lệ ngang/dọc cực đoan)*
+5. $w_{\text{area\_ratio}} = \lceil \sqrt{A_{\min} \cdot \bar{w} / \bar{h}} \cdot 1.03 \rceil$
 
-#### Chế độ 2 — Trên 300 hình (1.000 – 10.000+ hình): Masonry Column Min-Heap ($O(N \log K)$)
+Với mỗi bề rộng $w_0$:
+- Áp trần chiều cao chặt $h_{\text{limit}} = \max(\max_i h_i',\ \lceil (A_{\min} / w_{\text{try}}) \cdot 1.28 \rceil)$ và chạy tối đa **10 bước nới biên an toàn** ($h_{\text{limit}} \leftarrow \lceil 1.10 \cdot h_{\text{limit}} \rceil$, $w_{\text{try}} \leftarrow \lceil 1.04 \cdot w_{\text{try}} \rceil$) nếu `rpack.pack()` báo `PackingImpossibleError`.
+- Chấm điểm tất cả phương án thành công theo diện tích kết hợp phạt lệch tỷ lệ vuông:
+  $$\text{score}(b_w, b_h) = (b_w \cdot b_h) \times \left(1 + 0.22 \cdot \left|\ln\left(\frac{b_w}{b_h}\right)\right|\right)$$
+- Chọn phương án đạt `score` nhỏ nhất: đạt **`4 × 4` chuẩn xác** trên 16 ảnh chân dung và tỷ lệ **`bw / bh ≈ 1.06`** trên tập 14 ảnh pha trộn ngang/dọc.
+
+#### Chế độ 2 — Trên 300 đơn vị (1.000 – 10.000+ ảnh): Masonry Column Min-Heap ($O(N \log K)$)
 Khi nạp hàng ngàn bức ảnh, hàm `_pack_large_masonry(sizes)` thực hiện trong **dưới `5 ms`**:
 1. Tính tổng diện tích $A_{\min}$ và bề rộng trung bình $\bar{w} = \frac{1}{N}\sum w_i'$.
 2. Xác định số cột mục tiêu để tổng thể gần với **khối vuông** nhất:
@@ -91,21 +107,28 @@ Khi nạp hàng ngàn bức ảnh, hàm `_pack_large_masonry(sizes)` thực hi�
 
 ---
 
-### 2.3. Bước 3: Bù trừ Gốc Tọa Độ Xoay/Crop & Giữ Tâm Vùng Chọn (`ArrangeItems`)
+### 2.3. Bước 3: Bù Gốc Xoay/Crop, Khử Trôi `gap/2` & Di Chuyển Đồng Bộ Nhóm (`ArrangeItems`)
 
-Một lỗi kinh điển khi viết hàm xếp ảnh trên Canvas là gọi thẳng `item.setPos(target_pos)`, khiến những tấm ảnh đã bị **xoay góc** hoặc **cắt Crop** bị văng lệch khỏi ô chứa!
+Một lỗi kinh điển khi viết hàm xếp ảnh trên Canvas là gọi thẳng `item.setPos(target_pos)`, khiến những tấm ảnh đã bị **xoay góc** hoặc **cắt Crop** bị văng lệch khỏi ô chứa, hoặc làm xấp ảnh Nhóm Xếp Chồng bị rớt lại các tấm lót phía sau!
 
-Trong `beeref/commands.py` (`ArrangeItems.redo`), Birdboard xử lý chính xác bằng hiệu số vector giữa gốc nội tại `(0, 0)` của Item và góc trái-trên thực tế của khung bao sau biến đổi:
+Trong `beeref/commands.py` (`ArrangeItems.redo` / `undo`) và `beeref/scene.py` (`compute_optimal_positions`), Birdboard v1.1.0 xử lý trọn vẹn 3 bước:
+1. **Khử trôi `gap / 2`:** Tâm khối sau khi đóng gói được tính từ biên thực `unpadded_rects` ($\max_x = \max(p_x + w_{\text{thực}})$, $\max_y = \max(p_y + h_{\text{thực}})$) rồi dịch bằng `diff = selection_center - packed_center`, giữ độ lệch tâm **`0.0 px`**.
+2. **Bù độ lệch gốc biến đổi:** Tính hiệu số giữa gốc `(0, 0)` của item và góc trái-trên của khung đơn vị (`_collapsed_pile_local_rect()` nếu là Cover nhóm thu gọn, hoặc `bounding_rect_unselected()` nếu là ảnh rời).
+3. **Di chuyển đồng bộ toàn bộ thành viên nhóm (`_move_collapsed_companions`):** Hủy mọi animation đang bay (`cancel_flights_for`), dịch chuyển toàn bộ thẻ underlay và thẻ lớp sâu đang ẩn cùng vector `new_p - old_p`, cập nhật `stack_center` và đồng bộ `StackOverlayLabelItem`:
 
 ```python
 with self.scene.batch_update():
     for item, pos in zip(self.items, self.positions):
-        self.old_positions.append(item.pos())
+        old_p = QtCore.QPointF(item.pos())
+        self.old_positions.append(old_p)
         orig_topleft = item.mapToScene(QtCore.QPointF(0, 0))
-        rect_topleft = item.sceneTransform().mapRect(
-            item.bounding_rect_unselected()).topLeft()
-        # Bù độ lệch do Crop / Rotate / Flip để khung bao khớp khít 100% vào ô pos:
-        item.setPos(pos + orig_topleft - rect_topleft)
+        unit_local = (
+            item._collapsed_pile_local_rect()
+            if (hasattr(item, '_is_collapsed_stack_cover') and item._is_collapsed_stack_cover())
+            else item.bounding_rect_unselected()
+        )
+        rect_topleft = item.sceneTransform().mapRect(unit_local).topLeft()
+        new_p = pos + orig_topleft - rect_topleft
+        item.setPos(new_p)
+        self._move_collapsed_companions(item, new_p - old_p)
 ```
-
-Đồng thời toàn bộ khối được dịch chuyển một vector `diff = selection_center - QtCore.QPointF(bbox_w / 2, bbox_h / 2)` để khối vuông sau khi xếp luôn nằm ngay ngắn đúng tại tâm nhìn hiện tại của người dùng.

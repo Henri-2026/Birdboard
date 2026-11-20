@@ -16,18 +16,20 @@
 
 ---
 
-## 2. Điểm Nổi Bật Của Birdboard `v1.0.0`
+## 2. Điểm Nổi Bật Của Birdboard `v1.1.0`
 
+- **Nhóm Xếp Chồng Vật Lý (`Stack Group`), `Detail Stage View` & Tương Tác Chuẩn Xác (`v1.1.0`):**
+  - Gom nhiều hình thành xấp bưu thiếp xếp so le hạt giống kèm độ nghiêng nhẹ `±1.0° .. ±2.8°` (`Ctrl + G` / tách `Ctrl + Shift + G`), hiển thị số lượng nét mỏng `[N]` góc phải trên và **Tên nhóm** lơ lửng bên dưới giống thư mục (`StackOverlayLabelItem` chuẩn HiDPI `1x/1.5x/2x`).
+  - **Click đơn** chọn/di chuyển/resize nguyên khối với **khung chọn mảnh `1px` xám đen (`#3A3C42`) + 4 chấm tròn góc `4px`**, đổ bóng **9-patch Gaussian** mịn không đóng viền cứng, kéo chọn chính xác qua **khe hẹp** (`IntersectsItemShape`) và hiệu ứng **Hover Micro-Bounce** (`0% CPU` khi nghỉ).
+  - **Nhấp đúp (`Double-Click`)** phủ màn mờ `Canvas Wash` (`80%`) và bung lưới bằng động cơ **Multi-Width Pure `rpack` Optimal** (`4×4` trên 16 ảnh dọc, `aspect ≈ 1.06` trên ảnh pha trộn, nhận diện nhóm nguyên khối khi bấm `Shift + O` ngoài bảng); hỗ trợ kéo tách ảnh (`Pull-Out`) tự dồn hàng (`Live Grid Reflow`) và `Undo/Redo` an toàn tuyệt đối.
+  - **Màn hình Xem Chi Tiết (`Detail Stage View`):** Tích chọn Hình đại diện vàng `#FFDA12`, nhập `Tên nhóm...`, 5 ô màu chủ đạo `K-Means` (click copy HEX), `TÊN TỆP` sửa thông minh khóa nguyên đuôi `.jpg`/`.png`, `NGÀY TẠO` đủ năm 4 chữ số, và `Viết ghi chú...` ngay cột phải.
 - **Lõi Hiển Thị Chống Lag Tuyệt Đối (>100 FPS ở 1.200+ ảnh):**
   - Kết xuất phần cứng qua **`QOpenGLWidget` (4x MSAA)**.
   - **Tháp độ phân giải 3 tầng (3-Tier Mipmap LOD) & Async LRU Cache:** Luôn giữ bản thu nhỏ `384px` siêu nhẹ khi xem toàn cảnh; tự động giải mã ngầm bản `1280px` và `Full-Res 1:1` khi zoom gần, tự động giải phóng RAM khi lướt sang vùng khác.
-  - **Nạp ảnh song song đa nhân & Lưu/Mở tức thời:** Giải mã JPEG DCT trên toàn bộ nhân CPU, thuật toán xếp gạch *Masonry Packing* $O(N \log K)$ trong vài mili-giây cho bảng lớn, và lưu kèm bộ đệm `lod_thumbs` trong file `.bee` (SQLite).
-- **Menu Chuột Phải Kính Mờ Penart (`penart-ui-craft`):**
-  - Nền kính tối `rgba(28, 28, 34, 0.84)` làm nhòe thực vùng tranh bên dưới (`blur 20px` + `saturate 150%`).
-  - Quy tắc bo viền đồng tâm (`11px` ngoài / `5px` đệm / `6px` trong) và chuyển động hạ menu có quán tính **`480ms cubic-bezier(0.16, 1, 0.3, 1)`** ở 120 FPS.
-- **Hai Chế Độ Sáng / Tối & Cửa Sổ DWM Hiện Đại:**
-  - Chuyển đổi tức thời giữa **Studio Light Mode (`#E9EAEC`)** và **Penart Dark Mode (`#1A1A1D`)** trong `Settings`.
-  - Cửa sổ không viền bo góc mượt với quầng bóng đổ sâu tự nhiên của Windows 11 DWM và cụm 3 chấm điều khiển gọn gàng ở góc trái trên.
+  - **Nạp ảnh song song đa nhân & Lưu/Mở tức thời:** Giải mã JPEG DCT trên toàn bộ nhân CPU, thuật toán xếp gạch *Masonry Packing* $O(N \log K)$ trong vài mili-giây cho bảng lớn, và lưu kèm bộ đệm `lod_thumbs` + toàn bộ metadata nhóm trong file `.bee` (SQLite).
+- **Menu Chuột Phải Kính Mờ Penart (`penart-ui-craft`) & Dual-Theme DWM:**
+  - Nền kính tối `rgba(28, 28, 34, 0.84)` làm nhòe thực vùng tranh bên dưới (`blur 20px` + `saturate 150%`), bo viền đồng tâm (`11px / 5px / 6px`) và quán tính **`480ms cubic-bezier(0.16, 1, 0.3, 1)`** ở 120 FPS.
+  - Chuyển đổi tức thời giữa **Studio Light Mode (`#E9EAEC`)** và **Penart Dark Mode (`#1A1A1D`)** trên cửa sổ không viền Windows 11 DWM bo góc.
 
 ---
 
@@ -43,8 +45,10 @@ BIRDBOARD/
 ├── pyproject.toml            # Khai báo cấu hình gói Python & thư viện phụ thuộc
 ├── beeref/                   # Mã nguồn chính của ứng dụng Birdboard
 ├── docs/                     # Thư mục tài liệu kỹ thuật & thiết kế chi tiết
-│   ├── ARRANGE_OPTIMAL_AND_GAP_GUIDE.md   # Thuật toán xếp khối vuông Optimal & khoảng cách Gap
-│   ├── ZERO_LAG_AND_ANTI_ALIASING_GUIDE.md # Kỹ thuật xem >1.000 hình không lag, không răng cưa
+│   ├── STACK_GROUP_AND_ARRANGEMENT_GUIDE.md # Hướng dẫn & quy tắc Nhóm Xếp Chồng, Detail Stage & Optimal Packing
+│   ├── ARRANGE_OPTIMAL_AND_GAP_GUIDE.md     # Thuật toán xếp khối vuông Optimal & khoảng cách Gap
+│   ├── ZERO_LAG_AND_ANTI_ALIASING_GUIDE.md  # Kỹ thuật xem >1.000 hình không lag, không răng cưa
+│   ├── STACK_GROUP_BIRDBOARD_SPEC.md        # Đặc tả gốc tính năng Group - Xếp chồng
 │   ├── ARCHITECTURE.md       # Giải phẫu kiến trúc GPU, LOD Cache, Scene & SQLite
 │   ├── UI_DESIGN_SYSTEM.md   # Hệ màu, vật lý chuyển động Penart & thiết kế Bảng Đồng Hồ
 │   ├── REFERENCE_ANALYSIS.md # Phân tích đối chiếu các kho mã nguồn mẫu
@@ -77,6 +81,7 @@ python -m venv .venv
 
 ## 5. Tài Liệu Chi Tiết
 
+- **[Hướng Dẫn Toàn Tập: Nhóm Xếp Chồng (`Stack Group`), Quy Tắc Bên Trong & Sắp Xếp Hình (`Optimal`)](docs/STACK_GROUP_AND_ARRANGEMENT_GUIDE.md)** *(Mới ở `v1.1.0`)*
 - **[Thuật toán Xếp Khối Vuông (`Arrange -> Optimal`) & Khoảng Cách (`Arrange Gap`)](docs/ARRANGE_OPTIMAL_AND_GAP_GUIDE.md)**
 - **[Kỹ thuật Hiển thị >1.000 Hình Không Lag & Không Răng Cưa](docs/ZERO_LAG_AND_ANTI_ALIASING_GUIDE.md)**
 - [Hướng dẫn dành cho AI Agent (`AGENT.md`)](AGENT.md)

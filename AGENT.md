@@ -32,7 +32,7 @@ Mọi tính năng thêm mới vào Canvas **không bao giờ** được làm gi�
   - Giữ cơ chế cache `_cached_all_bounds` & `_cached_sel_bounds` cho `itemsBoundingRect()`.
   - Mọi thao tác chỉnh sửa hàng loạt (Insert, Delete, Move, Scale, Rotate, Arrange, Undo/Redo) bắt buộc bọc trong `with scene.batch_update():`.
   - Khi sắp xếp `Optimal` với số lượng ảnh `> 300`, dùng thuật toán `_pack_large_masonry` ($O(N \log K)$) thay vì `rpack` ($O(N^{2.5})$).
-- **Hiệu ứng trên từng ảnh (như đổ bóng Card Shadow):** Phải có điều kiện lọc theo LOD (`screen_max_edge > 150`), tự động bỏ qua khi zoom xa toàn cảnh và tuyệt đối không dùng `QGraphicsDropShadowEffect` (CPU-bound).
+- **Hiệu ứng trên từng ảnh (như đổ bóng Card Shadow, Hover Micro-Bounce) & Chỉ mục BSP Qt6:** Phải có điều kiện lọc theo LOD (`screen_max_edge > 90` cho 9-patch Gaussian Shadow; `> 45` cho Hover lift), tuyệt đối không dùng `QGraphicsDropShadowEffect` (CPU-bound). `BeePixmapItem.boundingRect()` bắt buộc là hằng số theo hệ tọa độ cục bộ (`pad = max(18, 0.045*max(w,h))`), không phụ thuộc `view_scale` hay các item khác; nhãn `[N]` và `stack_name` tách riêng sang `StackOverlayLabelItem` phi tương tác để chống hỏng cây `BspTreeIndex` trên bảng cực lớn.
 
 ### Bất biến #2 — Quy chuẩn Giao diện & Vật lý Chuyển động Penart (`penart-ui-craft`)
 - **Dropdown chuột phải & Submenu (`beeref/widgets/penart_menu.py`):**
@@ -61,8 +61,10 @@ D:\.Linh app\BIRDBOARD\
 ├── Birdboard.spec              # Cấu hình đóng gói file Birdboard.exe độc lập (PyInstaller)
 ├── pyproject.toml              # Khai báo metadata gói Birdboard & dependencies
 ├── docs/                       # Tài liệu kỹ thuật chuyên sâu
+│   ├── STACK_GROUP_AND_ARRANGEMENT_GUIDE.md # Hướng dẫn & quy tắc Nhóm Xếp Chồng, Detail Stage & Optimal Packing
 │   ├── ARRANGE_OPTIMAL_AND_GAP_GUIDE.md    # Thuật toán xếp khối vuông Optimal & Arrange Gap
 │   ├── ZERO_LAG_AND_ANTI_ALIASING_GUIDE.md # Giải phẫu chống lag & khử răng cưa >1.000 hình
+│   ├── STACK_GROUP_BIRDBOARD_SPEC.md       # Đặc tả gốc tính năng Group - Xếp chồng & Detail Stage
 │   ├── ARCHITECTURE.md         # Kiến trúc Engine GPU, 3-Tier LOD, Scene O(1) & SQLite I/O
 │   ├── UI_DESIGN_SYSTEM.md     # Quy chuẩn màu sắc, Penart Dropdown, DWM & thiết kế Bảng Đồng Hồ
 │   ├── REFERENCE_ANALYSIS.md   # Phân tích đối chiếu các repo mẫu trong reporef/
@@ -80,17 +82,21 @@ D:\.Linh app\BIRDBOARD\
 │   ├── scene.py                # Canvas vô cực, BSP-12, O(1) bounds cache, Masonry Packer
 │   ├── items.py                # BeePixmapItem (3-Tier LOD + Card Shadow) & BeeTextItem
 │   ├── lod_cache.py            # Bộ quản lý Mipmap LOD & giải mã đa luồng LRU Cache
+│   ├── stack_manager.py        # Quản lý Group Xếp chồng, Spread Grid, Canvas Wash & Pull-Out
+│   ├── deskboard_motion.py     # Hệ phương trình lò xo 120 FPS (Spring) & K-Means Palette
 │   ├── win_dwm.py              # Bo góc, đổ bóng Windows 11 DWM, Resize 8 hướng & nút 3 chấm
-│   ├── selection.py            # Khung chọn, tay nắm Scale/Rotate/Flip (#3A82F7)
-│   ├── commands.py             # Hệ thống Undo/Redo gom lô (batch_update)
+│   ├── selection.py            # Khung chọn mảnh xám đen (1px, #3A3C42) & 4 chấm tròn góc
+│   ├── commands.py             # Hệ thống Undo/Redo gom lô (batch_update + Stack Commands)
 │   ├── actions/                # Định nghĩa lệnh, phím tắt & cây menu chuột phải
 │   ├── config/                 # Quản lý cài đặt người dùng (.ini) & sự kiện đổi Theme
 │   ├── fileio/                 # Nạp ảnh song song DCT & đọc/ghi SQLite (.bee + lod_thumbs)
 │   ├── widgets/
 │   │   ├── penart_menu.py      # Hệ thống Dropdown Kính Mờ Penart 120 FPS
+│   │   ├── contextual_toolbar.py # Thanh công cụ nổi đảo màu ở đáy & Toast thông báo
+│   │   ├── detail_stage.py     # Màn hình xem chi tiết 1 hình, đổi tên thông minh, Note & Swatch
 │   │   ├── welcome_overlay.py  # Màn hình chờ hiển thị logo tròn & file gần đây
 │   │   └── settings.py         # Hộp thoại Cài đặt (bao gồm chuyển đổi Light/Dark Mode)
-│   └── assets/                 # Logo tròn Birdboard (PNG, multi-size ICO, SVG) & con trỏ
+│   └── assets/                 # Logo tròn Birdboard, font Be Vietnam Pro & bộ SVG icons
 └── tests/                      # Bộ kiểm thử tự động
 ```
 

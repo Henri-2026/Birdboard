@@ -6,11 +6,11 @@ build-backend = "setuptools.build_meta"
 include = ["beeref*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.html", "*.png", "*.ico"]
+"*" = ["*.html", "*.png", "*.ico", "*.svg", "*.ttf"]
 
 [project]
 name = "Birdboard"
-version = "1.0.0"
+version = "1.1.0"
 description = "High-performance personalized infinite reference canvas"
 readme = "README.md"
 license = {file = "LICENSE"}

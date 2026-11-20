@@ -30,6 +30,12 @@ from beeref import fileio
 from beeref.fileio.errors import IMG_LOADING_ERROR_MSG
 from beeref.fileio.export import exporter_registry, ImagesToDirectoryExporter
 from beeref import widgets
+from beeref.widgets.contextual_toolbar import (
+    ContextualToolbar,
+    DeskboardToast,
+    ToolbarButtonSpec,
+)
+from beeref.widgets.detail_stage import DetailStageOverlay
 from beeref.widgets.penart_menu import PenartMenuController
 from beeref.win_dwm import (
     TrafficLightControls,
@@ -98,11 +104,18 @@ class BeeGraphicsView(MainControlsMixin,
         # Context menu and actions
         self.control_target = self
         self.traffic_lights = TrafficLightControls(parent, self)
+        self.contextual_toolbar = ContextualToolbar(self)
+        self.contextual_toolbar.action_triggered.connect(
+            self.on_contextual_toolbar_action)
+        self.detail_stage = DetailStageOverlay(self)
+        self.detail_stage.closed.connect(self.on_detail_stage_closed)
+        self.detail_stage.delete_requested.connect(self.on_detail_delete_item)
         self.build_menu_and_actions()
         self.init_main_controls(main_window=parent)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self.welcome_overlay.raise_()
+        self.contextual_toolbar.raise_()
         self.traffic_lights.raise_()
 
         settings_events.theme_changed.connect(self.apply_theme)
@@ -226,6 +239,12 @@ class BeeGraphicsView(MainControlsMixin,
         self.welcome_overlay.apply_theme()
         if hasattr(self, 'traffic_lights'):
             self.traffic_lights.set_theme(is_dark)
+        if hasattr(self, 'detail_stage'):
+            self.detail_stage.apply_theme()
+        if hasattr(self, 'contextual_toolbar'):
+            self.contextual_toolbar.update()
+        if hasattr(self.scene, 'stack_manager'):
+            self.scene.stack_manager.on_theme_changed()
         text_col = QtGui.QColor(*constants.COLORS['Scene:Text'])
         for item in self.scene.items_by_type('text'):
             item.setDefaultTextColor(text_col)
@@ -386,9 +405,19 @@ class BeeGraphicsView(MainControlsMixin,
     def on_action_delete_items(self):
         logger.debug('Deleting items...')
         self.cancel_active_modes()
-        self.undo_stack.push(
-            commands.DeleteItems(
-                self.scene, self.scene.selectedItems(user_only=True)))
+        sel = self.scene.selectedItems(user_only=True)
+        # Include hidden deep members of any selected collapsed stack
+        seen = {id(i) for i in sel}
+        for it in list(sel):
+            sid = getattr(it, 'stack_id', None)
+            if sid and self.scene.stack_manager.active_spread_stack_id != sid:
+                for m in self.scene.stack_manager.members_of(sid):
+                    if id(m) not in seen:
+                        seen.add(id(m))
+                        sel.append(m)
+        if sel:
+            self.undo_stack.push(commands.DeleteItems(self.scene, sel))
+            self.refresh_contextual_toolbar()
 
     def on_action_cut(self):
         logger.debug('Cutting items...')
@@ -427,6 +456,132 @@ class BeeGraphicsView(MainControlsMixin,
     def on_action_arrange_gap(self):
         self.cancel_active_modes()
         widgets.ArrangeGapDialog(self, self.scene, self.undo_stack)
+
+    def show_toast(self, text: str):
+        DeskboardToast.show_toast(self, text)
+
+    def on_action_stack_group(self):
+        sid = self.scene.create_stack_from_selection()
+        if sid:
+            cnt = len(self.scene.stack_manager.members_of(sid))
+            self.show_toast(f'Đã xếp chồng {cnt} hình')
+            self.refresh_contextual_toolbar()
+
+    def on_action_unstack_group(self):
+        if self.scene.unstack_selection():
+            self.show_toast('Đã tách nhóm xếp chồng')
+            self.refresh_contextual_toolbar()
+
+    def open_detail_stage(self, item):
+        if not getattr(item, 'is_image', False):
+            return
+        scene_r = self.scene._item_scene_rect_fast(item)
+        poly = self.mapFromScene(scene_r)
+        origin_r = QtCore.QRectF(poly.boundingRect())
+        self.contextual_toolbar.set_buttons([], visible=False)
+        self.detail_stage.open_for_item(item, origin_r)
+
+    def on_detail_stage_closed(self):
+        self.setFocus()
+        self.refresh_contextual_toolbar()
+
+    def on_detail_delete_item(self, item):
+        if item and item.scene() is self.scene:
+            self.undo_stack.push(commands.DeleteItems(self.scene, [item]))
+            self.show_toast('Đã xóa hình ảnh (Ctrl+Z để hoàn tác)')
+
+    def export_selected_subset(self):
+        sel = [
+            it for it in self.scene.selectedItems(user_only=True)
+            if getattr(it, 'is_image', False)
+        ]
+        seen = {id(i) for i in sel}
+        for it in list(sel):
+            sid = getattr(it, 'stack_id', None)
+            if sid:
+                for m in self.scene.stack_manager.members_of(sid):
+                    if id(m) not in seen and getattr(m, 'is_image', False):
+                        seen.add(id(m))
+                        sel.append(m)
+        if not sel:
+            return
+        if len(sel) == 1:
+            it = sel[0]
+            fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, 'Xuất hình ảnh', it.display_filename,
+                'Images (*.png *.jpg *.jpeg)')
+            if fn:
+                data, _ = it.pixmap_to_bytes(apply_grayscale=True, apply_crop=True)
+                with open(fn, 'wb') as f:
+                    f.write(data)
+                self.show_toast(f'Đã xuất {os.path.basename(fn)}')
+            return
+
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            parent=self, caption='Chọn thư mục xuất ảnh')
+        if not directory:
+            return
+        saved = 0
+        for idx, it in enumerate(sel, start=1):
+            data, fmt = it.pixmap_to_bytes(apply_grayscale=True, apply_crop=True)
+            base = os.path.splitext(it.display_filename)[0]
+            out_path = os.path.join(directory, f'{idx:03d}-{base}.{fmt}')
+            try:
+                with open(out_path, 'wb') as f:
+                    f.write(data)
+                saved += 1
+            except OSError:
+                pass
+        self.show_toast(f'Đã xuất {saved} hình ảnh')
+
+    def on_contextual_toolbar_action(self, act_id: str):
+        if act_id == 'stack':
+            self.on_action_stack_group()
+        elif act_id == 'unstack':
+            self.on_action_unstack_group()
+        elif act_id == 'grid':
+            self.on_action_arrange_optimal()
+        elif act_id == 'spread':
+            sid = self.scene.selected_single_stack_id()
+            if sid:
+                self.scene.stack_manager.spread_stack(sid)
+                self.refresh_contextual_toolbar()
+        elif act_id == 'export':
+            self.export_selected_subset()
+        elif act_id == 'delete':
+            self.on_action_delete_items()
+
+    def refresh_contextual_toolbar(self):
+        if not hasattr(self, 'contextual_toolbar'):
+            return
+        if (hasattr(self, 'detail_stage') and self.detail_stage.isVisible()) or (
+                self.scene.stack_manager.active_spread_stack_id is not None):
+            self.contextual_toolbar.set_buttons([], visible=False)
+            return
+
+        single_sid = self.scene.selected_single_stack_id()
+        if single_sid:
+            self.contextual_toolbar.set_buttons([
+                ToolbarButtonSpec('unstack', 'spaces', 'Tách chồng (Ctrl+Shift+G)'),
+                ToolbarButtonSpec('spread', 'grid', 'Bung lưới xem nhóm'),
+                ToolbarButtonSpec('export', 'download', 'Xuất ảnh trong nhóm'),
+                ToolbarButtonSpec('delete', 'trash', 'Xóa nhóm (Del)'),
+            ], visible=True)
+            return
+
+        sel_imgs = [
+            it for it in self.scene.selectedItems(user_only=True)
+            if getattr(it, 'is_image', False)
+        ]
+        if len(sel_imgs) >= 2:
+            self.contextual_toolbar.set_buttons([
+                ToolbarButtonSpec('stack', 'stack', 'Xếp chồng (Ctrl+G)'),
+                ToolbarButtonSpec('grid', 'grid', 'Xếp lưới (Shift+O)'),
+                ToolbarButtonSpec('export', 'download', 'Xuất ảnh'),
+                ToolbarButtonSpec('delete', 'trash', 'Xóa (Del)'),
+            ], visible=True)
+        else:
+            self.contextual_toolbar.set_buttons([], visible=False)
 
     def on_action_change_opacity(self):
         images = [
@@ -511,6 +666,7 @@ class BeeGraphicsView(MainControlsMixin,
             self.filename = filename
             self.scene.add_queued_items()
             self.scene.take_pending_inserted_items()
+            self.scene.stack_manager.rebuild_loaded_stacks()
             self.on_action_fit_scene()
 
     def on_action_open_recent_file(self, filename):
@@ -823,6 +979,7 @@ class BeeGraphicsView(MainControlsMixin,
                     grayscale = getattr(item, 'grayscale', False)
                     actions.actions['grayscale'].qaction.setChecked(grayscale)
                     break
+        self.refresh_contextual_toolbar()
         self.viewport().update()
 
     def on_cursor_changed(self, cursor):
@@ -1044,10 +1201,23 @@ class BeeGraphicsView(MainControlsMixin,
         super().resizeEvent(event)
         self.recalc_scene_rect()
         self.welcome_overlay.resize(self.size())
+        if hasattr(self, 'contextual_toolbar'):
+            self.contextual_toolbar.sync_parent_resize()
+        if hasattr(self, 'detail_stage') and self.detail_stage.isVisible():
+            self.detail_stage.sync_parent_resize(self.size())
         if hasattr(self, 'traffic_lights') and self.traffic_lights.isVisible():
             self.traffic_lights.raise_()
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if hasattr(self, 'detail_stage') and self.detail_stage.isVisible():
+                self.detail_stage.close_stage(animate=True)
+                event.accept()
+                return
+            if self.scene.stack_manager.active_spread_stack_id is not None:
+                self.scene.stack_manager.collapse_spread_stack(animate=True)
+                event.accept()
+                return
         if self.keyPressEventMainControls(event):
             return
         if self.active_mode == self.SAMPLE_COLOR_MODE:

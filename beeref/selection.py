@@ -31,7 +31,10 @@ from beeref import utils
 
 commandline_args = CommandlineArgs()
 logger = logging.getLogger(__name__)
-SELECT_COLOR = QtGui.QColor(58, 130, 247)  # Penart #3A82F7
+
+
+def get_select_color() -> QtGui.QColor:
+    return QtGui.QColor(*COLORS['Scene:Selection'])
 
 
 def with_anchor(func):
@@ -137,9 +140,9 @@ class BaseItemMixin:
 class SelectableMixin(BaseItemMixin):
     """Common code for selectable items: Selection outline, handles etc."""
 
-    SELECT_LINE_WIDTH = 4  # line width for the selection box
-    SELECT_HANDLE_SIZE = 15  # size of selection handles for scaling
-    SELECT_RESIZE_SIZE = 20  # size of hover area for scaling
+    SELECT_LINE_WIDTH = 1.0  # crisp hairline selection outline
+    SELECT_HANDLE_SIZE = 4.0  # micro circular corner handles (50% smaller than 8px)
+    SELECT_RESIZE_SIZE = 16  # corner hover/grab area for scaling
     SELECT_ROTATE_SIZE = 10  # size of hover area for rotating
     SELECT_FREE_CENTER = 20  # size of handle-free area in the center
 
@@ -162,14 +165,16 @@ class SelectableMixin(BaseItemMixin):
         screen so we need to adjust the values according to the scale
         factor sof the view and the item."""
 
-        if self.scene():
-            scale = self.scene().views()[0].get_scale()
-            self._view_scale = scale
+        sc = self.scene()
+        if sc:
+            views = sc.views()
+            if views:
+                self._view_scale = views[0].get_scale()
 
         # It can happen that the item is already removed from
         # the scene but its boundingRect is still needed. Keep the
         # last known scaling factor for that case
-        return value / getattr(self, '_view_scale', 1) / self.scale()
+        return value / max(1e-6, getattr(self, '_view_scale', 1)) / max(1e-6, self.scale())
 
     @property
     def select_resize_size(self):
@@ -220,8 +225,11 @@ class SelectableMixin(BaseItemMixin):
         if not self.has_selection_outline():
             return
 
-        pen = QtGui.QPen(SELECT_COLOR)
-        pen.setWidth(self.SELECT_LINE_WIDTH)
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        sel_color = get_select_color()
+        pen = QtGui.QPen(sel_color)
+        pen.setWidthF(self.SELECT_LINE_WIDTH)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(QtGui.QBrush())
@@ -229,13 +237,14 @@ class SelectableMixin(BaseItemMixin):
         # Draw the main selection rectangle
         painter.drawRect(self.bounding_rect_unselected())
 
-        # If it's a single selection, draw the handles:
+        # If it's a single selection (or outer MultiSelectItem), draw refined corner circles:
         if self.has_selection_handles():
-            pen.setWidth(self.SELECT_HANDLE_SIZE)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
+            r = self.fixed_length_for_viewport(self.SELECT_HANDLE_SIZE * 0.5)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QBrush(sel_color))
             for corner in self.corners:
-                painter.drawPoint(corner)
+                painter.drawEllipse(corner, r, r)
+        painter.restore()
 
     @property
     def corners(self):
@@ -343,7 +352,7 @@ class SelectableMixin(BaseItemMixin):
         ]
 
     def boundingRect(self):
-        if not self.has_selection_outline():
+        if not self.has_selection_handles():
             return self.bounding_rect_unselected()
 
         # Add extra space for the interactive areas
@@ -353,31 +362,34 @@ class SelectableMixin(BaseItemMixin):
 
     def shape(self):
         path = QtGui.QPainterPath()
+        rect = self.bounding_rect_unselected()
+        path.addRect(rect)
         if self.has_selection_handles():
-            margin = self.select_resize_size / 2
-            rect = self.bounding_rect_unselected().marginsAdded(
-                QtCore.QMarginsF(margin, margin, margin, margin))
-            path.addRect(rect)
             for corner in self.corners:
+                path.addPath(self.get_scale_bounds(corner))
                 path.addPath(self.get_rotate_bounds(corner))
-        else:
-            rect = self.bounding_rect_unselected()
-            path.addRect(rect)
         return path
+
+    def hit_handle_at_scene_pos(self, scene_pos: QtCore.QPointF) -> bool:
+        if not self.has_selection_handles():
+            return False
+        pt = self.mapFromScene(scene_pos)
+        if pt in self.select_handle_free_center():
+            return False
+        for corner in self.corners:
+            if self.get_scale_bounds(corner).contains(pt) or self.get_rotate_bounds(corner).contains(pt):
+                return True
+        return False
 
     def hoverMoveEvent(self, event):
         if not self.has_selection_handles():
             return
 
         if event.pos() in self.select_handle_free_center():
-            # This area should always trigger regular move operations,
-            # even if it is covered by selection scale/flip/... handles.
-            # This ensures that small items can always still be moved/edited.
             self.unset_cursor()
             return
 
         for corner in self.corners:
-            # See if we need to change the cursor for interactable areas
             if self.get_scale_bounds(corner).contains(event.pos()):
                 self.scene().cursor_changed.emit(
                     self.get_corner_scale_cursor(corner))
@@ -385,13 +397,6 @@ class SelectableMixin(BaseItemMixin):
                 return
             elif self.get_rotate_bounds(corner).contains(event.pos()):
                 self.set_cursor(BeeAssets().cursor_rotate)
-                return
-        for edge in self.get_flip_bounds():
-            if edge['rect'].contains(event.pos()):
-                if self.get_edge_flips_v(edge):
-                    self.set_cursor(BeeAssets().cursor_flip_v)
-                else:
-                    self.set_cursor(BeeAssets().cursor_flip_h)
                 return
 
         self.unset_cursor()
@@ -441,27 +446,17 @@ class SelectableMixin(BaseItemMixin):
                         item.rotate_orig_degrees = item.rotation()
                     event.accept()
                     return
-                # Check if we are in one of the flip edges:
-                for edge in self.get_flip_bounds():
-                    if edge['rect'].contains(event.pos()):
-                        self.active_mode = self.FLIP_MODE
-                        event.accept()
-                        self.scene().undo_stack.push(
-                            commands.FlipItems(
-                                self.selection_action_items(),
-                                self.center_scene_coords,
-                                vertical=self.get_edge_flips_v(edge)))
-                        return
 
         super().mousePressEvent(event)
 
     def get_scale_factor(self, event):
-        """Get the scale factor for the current mouse movement."""
-        imgsize = math.sqrt(self.width**2 + self.height**2)
+        """Get the scale factor for the current mouse movement (clamped >= 0.04)."""
+        imgsize = max(1.0, math.sqrt(self.width**2 + self.height**2))
         p = event.scenePos() - self.event_start
         direction = self.event_direction
         delta = QtCore.QPointF.dotProduct(direction, p) / imgsize
-        return (self.scale_orig_factor + delta) / self.scale_orig_factor
+        orig = max(1e-5, getattr(self, 'scale_orig_factor', 1.0) or 1.0)
+        return max(0.04, (orig + delta) / orig)
 
     def get_scale_anchor(self, corner):
         """Get the anchor around which the scale for this corner operates."""
@@ -478,7 +473,7 @@ class SelectableMixin(BaseItemMixin):
     def get_direction_from_center(self, pos):
         """The direction of a point in relation to the item's center."""
         diff = pos - self.center_scene_coords
-        length = math.sqrt(QtCore.QPointF.dotProduct(diff, diff))
+        length = max(1e-6, math.sqrt(QtCore.QPointF.dotProduct(diff, diff)))
         return diff / length
 
     def get_rotate_angle(self, pos):
@@ -575,27 +570,47 @@ class SelectableMixin(BaseItemMixin):
 
     def mouseReleaseEvent(self, event):
         if self.active_mode == self.SCALE_MODE:
-            if self.get_scale_factor(event) != 1:
-                self.scene().undo_stack.push(
-                    commands.ScaleItemsBy(
-                        self.selection_action_items(),
-                        self.get_scale_factor(event),
-                        self.event_anchor,
-                        ignore_first_redo=True))
-            event.accept()
+            factor = self.get_scale_factor(event)
+            action_items = self.selection_action_items()
+            for item in action_items:
+                orig_s = getattr(item, 'scale_orig_factor', item.scale())
+                item.setScale(orig_s * factor,
+                              item.mapFromScene(self.event_anchor))
             self.active_mode = None
+            sc = self.scene()
+            if sc:
+                sc.on_selection_change()
+                if factor != 1:
+                    sc.undo_stack.push(
+                        commands.ScaleItemsBy(
+                            action_items,
+                            factor,
+                            self.event_anchor,
+                            ignore_first_redo=True))
+            event.accept()
             return
         elif self.active_mode == self.ROTATE_MODE:
-            self.scene().on_selection_change()
-            if self.get_rotate_delta(event.scenePos()) != 0:
-                self.scene().undo_stack.push(
-                    commands.RotateItemsBy(
-                        self.selection_action_items(),
-                        self.get_rotate_delta(event.scenePos()),
-                        self.event_anchor,
-                        ignore_first_redo=True))
-            event.accept()
+            snap = (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                    or event.modifiers() == Qt.KeyboardModifier.ShiftModifier)
+            delta = self.get_rotate_delta(event.scenePos(), snap)
+            action_items = self.selection_action_items()
+            for item in action_items:
+                orig_r = getattr(item, 'rotate_orig_degrees', item.rotation())
+                item.setRotation(
+                    orig_r + delta * item.flip(),
+                    item.mapFromScene(self.event_anchor))
             self.active_mode = None
+            sc = self.scene()
+            if sc:
+                sc.on_selection_change()
+                if delta != 0:
+                    sc.undo_stack.push(
+                        commands.RotateItemsBy(
+                            action_items,
+                            delta,
+                            self.event_anchor,
+                            ignore_first_redo=True))
+            event.accept()
             return
         elif self.active_mode == self.FLIP_MODE:
             for edge in self.get_flip_bounds():
@@ -643,10 +658,26 @@ class MultiSelectItem(SelectableMixin,
 
     def selection_action_items(self):
         """The items affected by selection actions like scaling and rotating.
+        Includes hidden deep members of any selected collapsed stack.
         """
-        if self.scene():
-            return list(self.scene().selectedItems())
-        return []
+        sc = self.scene()
+        if not sc:
+            return []
+        items = list(sc.selectedItems())
+        if hasattr(sc, 'stack_manager'):
+            seen = {id(i) for i in items}
+            sids = {
+                getattr(i, 'stack_id', None)
+                for i in items
+                if getattr(i, 'stack_id', None)
+                and sc.stack_manager.active_spread_stack_id != getattr(i, 'stack_id', None)
+            }
+            for sid in sids:
+                for m in sc.stack_manager.members_of(sid):
+                    if id(m) not in seen:
+                        seen.add(id(m))
+                        items.append(m)
+        return items
 
     def lower_behind_selection(self):
         items = self.selection_action_items()
@@ -685,19 +716,57 @@ class MultiSelectItem(SelectableMixin,
 
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        mode = self.active_mode
+        super().mouseMoveEvent(event)
+        if mode in (self.SCALE_MODE, self.ROTATE_MODE):
+            sc = self.scene()
+            if sc and hasattr(sc, 'stack_manager') and hasattr(sc.stack_manager, 'sync_selected_stack_labels'):
+                sc.stack_manager.sync_selected_stack_labels()
+
+    def mouseReleaseEvent(self, event):
+        sc = self.scene()
+        mode = self.active_mode
+        keep_sel = None
+        if (self.active_mode is None
+                and sc is not None
+                and event.button() == Qt.MouseButton.LeftButton
+                and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)):
+            keep_sel = [i for i in sc.selectedItems(user_only=True) if i.isVisible()]
+
+        super().mouseReleaseEvent(event)
+
+        if mode in (self.SCALE_MODE, self.ROTATE_MODE):
+            if sc is not None and hasattr(sc, 'stack_manager') and hasattr(sc.stack_manager, 'sync_selected_stack_labels'):
+                sc.stack_manager.sync_selected_stack_labels()
+
+        if keep_sel and sc is not None and not sc.selectedItems(user_only=True):
+            with sc.batch_update():
+                for it in keep_sel:
+                    if it.scene() is sc:
+                        it.setSelected(True)
+
 
 class RubberbandItem(BaseItemMixin, QtWidgets.QGraphicsRectItem):
     """The outline for the rubber band selection."""
 
     def __init__(self):
         super().__init__()
-        color = QtGui.QColor(SELECT_COLOR)
-        color.setAlpha(40)
-        self.setBrush(QtGui.QBrush(color))
-        pen = QtGui.QPen(QtGui.QColor(0, 0, 0))
-        pen.setWidth(1)
+        self._sync_colors()
+
+    def _sync_colors(self):
+        base = get_select_color()
+        fill = QtGui.QColor(base)
+        fill.setAlpha(24)
+        self.setBrush(QtGui.QBrush(fill))
+        pen = QtGui.QPen(base)
+        pen.setWidthF(1.0)
         pen.setCosmetic(True)
         self.setPen(pen)
+
+    def paint(self, painter, option, widget):
+        self._sync_colors()
+        super().paint(painter, option, widget)
 
     def __str__(self):
         return (f'RubberbandItem {self.width} x {self.height}')

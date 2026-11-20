@@ -28,11 +28,11 @@ Tất cả phím tắt và thao tác chuột trong **Birdboard** đều có th�
 | :--- | :--- |
 | **Thêm ảnh vào bảng** | Kéo thả file từ ngoài vào, `Ctrl + V` từ Clipboard, hoặc `Insert -> Images` |
 | **Thêm ghi chú chữ (`Text Note`)** | `Ctrl + T` (Nhấp đúp vào chữ để sửa nội dung) |
-| **Chọn nhiều ảnh** | Kéo khung chọn trên nền trống hoặc giữ `Ctrl + Click` |
-| **Chọn tất cả / Bỏ chọn tất cả** | `Ctrl + A` / `Ctrl + Shift + A` |
-| **Phóng to / Thu nhỏ ảnh** | Kéo 4 góc của khung chọn |
+| **Chọn nhiều ảnh** | Kéo khung chọn trên nền trống / khe hẹp giữa các ảnh, hoặc giữ `Ctrl + Click` (chọn/bỏ chọn nguyên nhóm nếu là nhóm thu gọn) |
+| **Chọn tất cả / Bỏ chọn tất cả** | `Ctrl + A` *(chỉ chọn các ảnh đang hiển thị, bỏ qua thẻ ẩn trong nhóm)* / `Ctrl + Shift + A` |
+| **Phóng to / Thu nhỏ ảnh** | Kéo 4 chấm tròn góc (`4px`) của khung chọn |
 | **Xoay ảnh (`Rotate`)** | Kéo vùng bên ngoài 4 góc khung chọn (giữ `Ctrl` hoặc `Shift` để bắt góc mỗi `15°`) |
-| **Lật ngang / Lật dọc (`Flip`)** | Phím `H` / Phím `V` (hoặc click vào cạnh khung chọn) |
+| **Lật ngang / Lật dọc (`Flip`)** | Phím `H` / Phím `V` |
 | **Cắt cúp ảnh không mất gốc (`Crop`)** | Chọn 1 ảnh rồi bấm `Shift + C` (`Enter` để xác nhận, `Esc` để hủy) |
 | **Hút mã màu (`Sample Color`)** | Phím `S` rồi click vào điểm ảnh (tự copy mã HEX vào Clipboard) |
 | **Xem trắng đen (`Grayscale`)** | Chọn ảnh -> `Images -> Grayscale` |
@@ -53,7 +53,24 @@ Tất cả phím tắt và thao tác chuột trong **Birdboard** đều có th�
 
 ---
 
-## 4. Quản Lý File Dự Án
+## 4. Nhóm Xếp Chồng (`Stack Group`) & Xem Chi Tiết (`Detail Stage`)
+
+| Thao tác | Cách thực hiện mặc định |
+| :--- | :--- |
+| **Gom các ảnh đang chọn thành Nhóm Xếp Chồng (`Stack Group`)** | `Ctrl + G` *(hoặc bấm nút Xếp chồng trên thanh công cụ đáy)* |
+| **Tách nhóm xếp chồng (`Unstack Group`)** | `Ctrl + Shift + G` *(hoặc bấm nút Tách chồng trên thanh công cụ đáy)* |
+| **Chọn, di chuyển & Resize cả Nhóm** | `Click đơn` vào nhóm xếp chồng (hoặc `Ctrl + Click` để cộng/trừ cả nhóm; kéo thân nhóm để di chuyển, kéo 4 chấm tròn góc `4px` `#3A3C42` để Resize đồng bộ) |
+| **Bung lưới xem các ảnh trong Nhóm (`Spread Stack`)** | `Nhấp đúp (Double-Click)` vào nhóm xếp chồng trên bảng để bung lưới `rpack` Optimal *(hoặc bấm nút Bung lưới trên thanh công cụ đáy)* |
+| **Thu gọn lại nhóm xếp chồng** | `Click` ra vùng mờ bên ngoài (`Canvas Wash`, có khóa chống đóng nhầm `0.28s` sau khi bung) hoặc bấm `Esc` |
+| **Tách riêng 1 ảnh ra khỏi Nhóm (`Pull Out`)** | Khi nhóm đang bung lưới, nắm kéo 1 ảnh ra ngoài biên lưới (các ảnh còn lại tự dồn hàng) |
+| **Mở màn hình Xem Chi Tiết (`Detail Stage View`)** | `Click đơn` vào 1 ảnh khi nhóm đang bung lưới *(hoặc `Nhấp đúp` vào ảnh rời)* |
+| **Chọn làm Hình đại diện nhóm (`Group Cover`) & Đặt tên nhóm** | Bấm ô tròn dấu tích vàng `#FFDA12` và nhập `Tên nhóm...` ngay bên dưới ở cột trái màn hình Chi tiết |
+| **Sửa tên tệp thông minh (giữ nguyên đuôi `.jpg`/`.png`)** | `Nhấp đúp` vào tên tệp ở mục `TÊN TỆP` bên cột phải màn hình Chi tiết |
+| **Sao chép mã màu chủ đạo (`HEX`)** | Click vào 1 trong 5 ô tròn màu bên trái bức hình |
+
+---
+
+## 5. Quản Lý File Dự Án
 
 | Thao tác | Phím tắt mặc định |
 | :--- | :--- |

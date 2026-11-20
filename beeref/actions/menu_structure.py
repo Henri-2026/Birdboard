@@ -99,6 +99,9 @@ menu_structure = [
     {
         'menu': '&Arrange',
         'items': [
+            'stack_group',
+            'unstack_group',
+            MENU_SEPARATOR,
             'arrange_optimal',
             'arrange_horizontal',
             'arrange_vertical',

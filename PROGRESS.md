@@ -4,7 +4,7 @@ Tài liệu này theo dõi chi tiết các cột mốc đã hoàn thành, kiến
 
 ---
 
-## Phiên bản hiện tại: `v1.0.0` (Đã hoàn thành & Push GitHub)
+## Phiên bản hiện tại: `v1.1.0` (Stack Group, Detail Stage & Pure `rpack` Optimal — Đã hoàn thành & Phát hành)
 
 ### Giai đoạn 0 — Nghiên cứu & Tuyển chọn Kiến trúc (`2026-11-18`)
 - [x] Khảo sát hệ sinh thái mã nguồn mở thay thế PureRef trên GitHub (`BeeRef`, `PureRef-format`, `AnimRef`, `Allusion`).
@@ -39,9 +39,26 @@ Tài liệu này theo dõi chi tiết các cột mốc đã hoàn thành, kiến
 - [x] Xây dựng đầy đủ hệ thống tài liệu quản trị dự án: `AGENT.md`, `README.md`, `PROGRESS.md` và bộ tài liệu kỹ thuật trong `docs/`.
 - [x] Tải và tổ chức kho mã nguồn tham chiếu trong `reporef/` (`beeref`, `PureRef-format`, `AnimRef`).
 
+### Giai đoạn 4 — Tính Năng Group - Xếp Chồng (`Stack Group`) & `Detail Stage View` (`2026-11-19`)
+- [x] **Vòng đời 5 trạng thái Xếp chồng vật lý 120 FPS (`beeref/stack_manager.py`, `beeref/deskboard_motion.py`):**
+  - **Multi-Select Toolbar (`ContextualToolbar`):** Khi chọn `>= 2` ảnh, thanh nổi đảo màu trồi lên ở đáy (`Spring present 260/24`) với `[Xếp chồng (Ctrl+G), Xếp lưới (Shift+O), Xuất, Xóa]`.
+  - **Collapsed Physical Pile (`Ctrl + G`):** Gom ảnh về tâm chọn (`Spring place 300/30` + `Spring pop 420/14`). Hình đại diện (`is_stack_cover=True`) luôn đứng đầu `#0` (`0°`, `zValue` cao nhất qua `sort_stack_members`), tối đa 12 lớp dưới xếp so le hạt giống cố định kèm góc xoay nhẹ `±1.0° .. ±2.8°` (`Seeded Collage Scatter`, tự ẩn từ lớp 13 trở đi giữ vững `>100 FPS`). Bóng đổ mềm `_draw_soft_card_shadow` và biên `boundingRect()` cố định theo hệ tọa độ item (kẹp chặt trong vùng đệm `pad`) giúp chỉ số BSP của `QGraphicsScene` ổn định ở mọi mức zoom.
+  - **Nhãn Số Lượng `[N]` & Tên Group Tách Rời (`StackOverlayLabelItem`):** Tách hoàn toàn nhãn `[N]` và `stack_name` (`Be Vietnam Pro Light 300`, `#1A1A1C` / `#EAEAF0`) sang `StackOverlayLabelItem` phi tương tác (`shape()` rỗng, `LOD < 24px` tự ẩn), không làm phình `boundingRect()` của thẻ ảnh; chuẩn hóa HiDPI (`devicePixelRatioF()`) cho cả `StackOverlayLabelItem` lẫn Cover badge `#FFDA12` để giữ kích thước 1:1 trên màn hình `1x`/`1.5x`/`2x` và tự đồng bộ tức thời khi di chuyển, xoay/resize, zoom, đổi theme hoặc Undo/Redo.
+  - **Click Đơn Chọn/Di Chuyển/Resize — Nhấp Đúp Bung Lưới `rpack` Optimal (`Spread`):** Click đơn chọn gọn Group với **khung chọn mảnh `1px` (`#3A3C42`) + 4 chấm tròn góc `4px`** (`constants.py` & `selection.py`), hỗ trợ kéo & Resize an toàn (`factor >= 0.04`, `get_stack_center` luôn đọc tâm Cover thực tế chống văng tọa độ 100%). **Nhấp đúp (`Double-Click`)** phủ lớp mờ `CanvasWashItem` (`α = 0.80`, `0.30s`) kèm khóa chống đóng nhầm 3rd-click `0.28s` (`can_dismiss_spread_by_wash`), bung lưới bằng **`rpack.pack` Optimal Spread thuần** (loại bỏ vòng lặp bảng cứng, căn tâm chuẩn `0.0px` không lệch `gap/2`). Click ra ngoài hoặc bấm `Esc` để thu gọn (`0.24s`).
+  - **Kéo Chọn Khe Hẹp, `Ctrl+Click` / `Ctrl+A` & `Hover Micro-Bounce`:** Dùng `IntersectsItemShape` khi kéo khung chọn qua các khe hẹp (kể cả khoảng trống bên trong khung `MultiSelectItem`), `Ctrl+Click` bật/tắt chọn nguyên nhóm thu gọn, `Ctrl+A` chỉ chọn các thẻ đang hiển thị (bỏ qua lớp ẩn); hiệu ứng nhún nhẹ `Hover Micro-Bounce` (`Spring lift 420/26`) kẹp gọn trong `pad`, tự tạm ngưng khi đang kéo/pan/zoom và dừng timer ở `0% CPU` khi nghỉ.
+  - **Kéo Tách Khỏi Nhóm (`Pull-Out`) & Undo/Redo An Toàn (`cancel_flights_for`):** Kéo 1 thẻ trong lưới Spread ra ngoài `keep_zone` (`±48px`) kích hoạt các thẻ còn lại tự dồn hàng tức thời (`Spring place 300/30`). Bổ sung `cancel_flights_for` dọn animation đang bay và khôi phục tỷ lệ gốc trước các lệnh `CreateStack`, `Unstack`, `PullOut`, `DeleteItems`, `SetStackCover`, `ArrangeItems` để tránh mất hiển thị khi `Ctrl+Z` giữa chừng.
+- [x] **Màn Hình Xem Chi Tiết `DetailStageOverlay` (`beeref/widgets/detail_stage.py`):**
+  - **Cột trái:** Ô tròn Tick chọn **Hình đại diện Group** (`28×28px`, nền vàng `#FFDA12` khi active) + dòng nhập **Tên nhóm (`Tên nhóm...`)** nằm ngay bên dưới + **5 ô màu chủ đạo** (`K-Means` sắp từ sáng đến tối, click để copy mã HEX).
+  - **Cột phải:** `KÍCH THƯỚC` (`W × H`), `TÊN TỆP` (**nhấp đúp sửa tên thông minh** chỉ bôi đen phần tên và giữ khóa nguyên phần đuôi `.jpg`/`.png`), `NGÀY TẠO` (**hiển thị đầy đủ ngày, tháng, năm**: `Tạo vào DD tháng MM, YYYY`), và ô **`Viết ghi chú...`** đặt ngay bên dưới `NGÀY TẠO`.
+  - **Thanh Dark Toolbar đáy Stage:** Giữ nút `Điều chỉnh` (`sliders.svg`) ở trạng thái làm mờ (`opacity=0.28`, vô hiệu hóa chờ phát triển sau), cùng 3 nút `Sao chép`, `Xuất ảnh`, `Xóa ảnh`.
+- [x] **Lưu/Mở trọn vẹn trong file dự án `.bee` (SQLite JSON) & Full Undo/Redo** cho mọi thao tác nhóm.
+- [x] **Tài liệu hướng dẫn chuyên sâu & Đóng gói phát hành `Birdboard v1.1.0` (`2026-11-20`):**
+  - Hoàn thiện bộ hướng dẫn chuyên sâu [docs/STACK_GROUP_AND_ARRANGEMENT_GUIDE.md](docs/STACK_GROUP_AND_ARRANGEMENT_GUIDE.md), cập nhật [docs/ARRANGE_OPTIMAL_AND_GAP_GUIDE.md](docs/ARRANGE_OPTIMAL_AND_GAP_GUIDE.md) & [docs/CONTROLS_AND_SHORTCUTS.md](docs/CONTROLS_AND_SHORTCUTS.md).
+  - Đóng gói `release/v1.1.0/` + `release/Birdboard-v1.1.0-Source-and-Docs.zip` và phát hành GitHub Release `v1.1.0`.
+
 ---
 
-## Backlog Tiếp Theo (Dự kiến cho `v1.1` / `v2.0`)
+## Backlog Tiếp Theo (Dự kiến cho `v1.2` / `v2.0`)
 
 ### 1. Bảng Đồng Hồ Nổi — *Floating Clock HUD Pill* (Ưu tiên hàng đầu ở Round kế tiếp)
 - [ ] Thiết kế thẻ thuốc nổi cố định ở góc trái trên của khung nhìn (không bị trôi khi Pan/Zoom ảnh trên Canvas):
